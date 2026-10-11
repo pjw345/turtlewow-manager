@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """TurtleWoW control plane. Python standard library; no shell command API."""
 import argparse
+from auth import Auth, create_admin
 import contextlib
 import datetime as dt
 import fcntl
@@ -486,72 +487,106 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+        if getattr(self, 'cookie', None):
+            self.send_header('Set-Cookie', self.cookie)
         self.end_headers()
         self.wfile.write(raw)
 
     def permitted(self):
-        host = self.headers.get('Host', '')
-        allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
-        if host not in allowed:
-            self.reply(403, {'error': 'Use the loopback SSH tunnel address.'})
+        origin = self.server.manager.config.get('public_origin', 'https://turtlewow-server')
+        if self.headers.get('Host', '') != urlsplit(origin).netloc:
+            self.reply(403, {'error': 'Use the configured dashboard address.'})
             return False
         return True
+
+    def session(self):
+        return self.server.auth.session(self.headers.get('Cookie'))
 
     def do_GET(self):
         if not self.permitted():
             return
         path = urlsplit(self.path).path
-        if path == '/api/status':
-            self.reply(200, self.server.manager.status())
-        elif path in ('/', '/app.js', '/style.css'):
-            leaf = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[path]
-            content = (ROOT / 'web' / leaf).read_bytes().replace(b'__CSRF__', self.server.manager.csrf.encode())
-            mime = {'/': 'text/html', '/app.js': 'text/javascript', '/style.css': 'text/css'}[path]
-            self.reply(200, content, mime)
+        token, session = self.session()
+        if path == '/admin/api/session':
+            self.reply(200, {'authenticated': bool(session), 'csrf': session['csrf'] if session else None,
+                             'setup_required': not self.server.auth.path.exists()})
+        elif path == '/admin/api/status':
+            self.reply(200, self.server.manager.status()) if session else self.reply(401, {'error': 'Sign in required.'})
+        elif path in ('/admin', '/admin/', '/admin/app.js', '/admin/style.css'):
+            leaf = 'index.html' if path in ('/admin', '/admin/') else path.rsplit('/', 1)[1]
+            mime = {'index.html': 'text/html', 'app.js': 'text/javascript', 'style.css': 'text/css'}[leaf]
+            self.reply(200, (ROOT / 'web' / leaf).read_bytes(), mime)
         else:
             self.reply(404, {'error': 'Not found'})
 
     def do_POST(self):
         if not self.permitted():
             return
-        origin = self.headers.get('Origin')
-        expected = 'http://' + self.headers['Host']
-        if origin != expected or not secrets.compare_digest(self.headers.get('X-CSRF-Token', ''), self.server.manager.csrf):
-            self.reply(403, {'error': 'Refresh the dashboard before submitting an action.'})
+        expected = self.server.manager.config.get('public_origin', 'https://turtlewow-server')
+        if self.headers.get('Origin') != expected:
+            self.reply(403, {'error': 'Invalid request origin.'})
             return
         if self.headers.get('Content-Type') != 'application/json':
             self.reply(415, {'error': 'JSON required'})
             return
-        if urlsplit(self.path).path != '/api/action':
-            self.reply(404, {'error': 'Not found'})
-            return
+        path = urlsplit(self.path).path
+        token, session = self.session()
+        if path != '/admin/api/login':
+            if not session:
+                self.reply(401, {'error': 'Sign in required.'})
+                return
+            if not secrets.compare_digest(self.headers.get('X-CSRF-Token', ''), session['csrf']):
+                self.reply(403, {'error': 'Refresh the dashboard before submitting an action.'})
+                return
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            if not 0 < length <= 1024:
+            if not 0 < length <= 2048:
                 raise ValueError('Invalid request size')
             value = json.loads(self.rfile.read(length))
-            action = value.get('action')
-            if action not in ACTIONS:
-                raise ValueError('Unknown action')
-            self.server.manager.submit(action)
-            self.reply(202, {'accepted': True})
+            if not isinstance(value, dict):
+                raise ValueError('JSON object required')
+            if path == '/admin/api/login':
+                username, password = value.get('username'), value.get('password')
+                if not isinstance(username, str) or not isinstance(password, str):
+                    raise ValueError('Username and password required')
+                token, error = self.server.auth.login(username, password)
+                if error:
+                    self.reply(401, {'error': error})
+                    return
+                self.cookie = 'turtlewow_session=' + token + '; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=28800'
+                self.reply(200, {'authenticated': True, 'csrf': self.server.auth.sessions[token]['csrf']})
+            elif path == '/admin/api/logout':
+                self.server.auth.logout(token)
+                self.cookie = 'turtlewow_session=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'
+                self.reply(200, {'authenticated': False})
+            elif path == '/admin/api/action':
+                action = value.get('action')
+                if action not in ACTIONS:
+                    raise ValueError('Unknown action')
+                self.server.manager.submit(action)
+                self.reply(202, {'accepted': True})
+            else:
+                self.reply(404, {'error': 'Not found'})
         except (ValueError, AttributeError) as exc:
             self.reply(400, {'error': str(exc)})
         except RuntimeError as exc:
             self.reply(409, {'error': str(exc)})
 
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['serve', 'start', 'stop', 'backup', 'build', 'activate', 'status'])
+    parser.add_argument('command', choices=['serve', 'start', 'stop', 'backup', 'build', 'activate', 'status', 'create-admin'])
     parser.add_argument('revision', nargs='?')
     args = parser.parse_args()
     os.umask(0o077)
+    if args.command == 'create-admin':
+        create_admin(CONFIG.parent / 'account.json')
+        return
     manager = Manager(load_json(CONFIG, {}))
     if args.command == 'serve':
         threading.Thread(target=manager.poll, daemon=True).start()
         server = http.server.ThreadingHTTPServer(('127.0.0.1', manager.config.get('port', 8787)), Handler)
         server.manager = manager
+        server.auth = Auth(CONFIG.parent / 'account.json')
         print('TurtleWoW manager listening on loopback port ' + str(server.server_port), flush=True)
         try:
             server.serve_forever()

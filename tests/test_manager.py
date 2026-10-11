@@ -220,6 +220,10 @@ class HttpTest(unittest.TestCase):
         self.server = manager.http.server.ThreadingHTTPServer(('127.0.0.1', 0), manager.Handler)
         self.server.manager = self.manager
         self.port = self.server.server_port
+        self.manager.config['public_origin'] = f'http://127.0.0.1:{self.port}'
+        self.server.auth = manager.Auth(pathlib.Path(self.temp.name) / 'account.json')
+        self.server.auth.sessions['test'] = {'csrf': self.manager.csrf, 'expires': time.monotonic()+100, 'last': time.monotonic(), 'hash': 'test', 'username': 'admin'}
+        manager.atomic_json(self.server.auth.path, {'hash': 'test'})
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -239,26 +243,52 @@ class HttpTest(unittest.TestCase):
         return status, body
 
     def test_rebinding_host_rejected(self):
-        self.assertEqual(self.request('GET', '/api/status', {'Host': 'evil.example'})[0], 403)
+        self.assertEqual(self.request('GET', '/admin/api/status', {'Host': 'evil.example'})[0], 403)
+
+    def test_unauthenticated_status_is_private(self):
+        self.assertEqual(self.request('GET', '/admin/api/status')[0], 401)
+
+    def test_login_cookie_csrf_and_logout(self):
+        from auth import password_hash
+        salt = 'ab' * 32
+        manager.atomic_json(self.server.auth.path, {'username': 'admin', 'salt': salt,
+                            'hash': password_hash('test-password-only', salt)})
+        headers = {'Content-Type': 'application/json', 'Origin': self.manager.config['public_origin']}
+        connection = http.client.HTTPConnection('127.0.0.1', self.port)
+        connection.request('POST', '/admin/api/login', json.dumps({'username': 'admin', 'password': 'test-password-only'}), headers)
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        cookie = response.getheader('Set-Cookie')
+        for protection in ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/admin']:
+            self.assertIn(protection, cookie)
+        csrf = json.loads(response.read())['csrf']
+        connection.close()
+        headers['Cookie'] = cookie.split(';')[0]
+        self.assertEqual(self.request('GET', '/admin/api/status', headers)[0], 200)
+        self.assertEqual(self.request('POST', '/admin/api/action', headers)[0], 403)
+        headers['X-CSRF-Token'] = csrf
+        self.assertEqual(self.request('POST', '/admin/api/logout', headers)[0], 200)
+        self.assertEqual(self.request('GET', '/admin/api/status', headers)[0], 401)
 
     def test_cross_origin_and_missing_csrf_cannot_start(self):
         base = {'Content-Type': 'application/json', 'Origin': f'http://127.0.0.1:{self.port}'}
-        self.assertEqual(self.request('POST', '/api/action', base)[0], 403)
+        self.assertEqual(self.request('POST', '/admin/api/action', base)[0], 401)
         base.update({'Origin': 'http://evil.example', 'X-CSRF-Token': self.manager.csrf})
-        self.assertEqual(self.request('POST', '/api/action', base)[0], 403)
+        self.assertEqual(self.request('POST', '/admin/api/action', base)[0], 403)
         self.assertEqual(self.manager.calls, [])
 
     def test_same_origin_csrf_action_rejected_when_locked(self):
-        headers = {'Content-Type': 'application/json', 'Origin': f'http://127.0.0.1:{self.port}', 'X-CSRF-Token': self.manager.csrf}
+        headers = {'Cookie': 'turtlewow_session=test', 'Content-Type': 'application/json', 'Origin': f'http://127.0.0.1:{self.port}', 'X-CSRF-Token': self.manager.csrf}
         with manager.operation_lock(self.manager.lock_path):
-            self.assertEqual(self.request('POST', '/api/action', headers)[0], 409)
+            self.assertEqual(self.request('POST', '/admin/api/action', headers)[0], 409)
         self.assertEqual(self.manager.calls, [])
 
     def test_frontend_has_security_headers_and_no_placeholder_token(self):
-        status, body = self.request('GET', '/')
+        status, body = self.request('GET', '/admin')
         self.assertEqual(status, 200)
         self.assertNotIn(b'__CSRF__', body)
-        self.assertIn(self.manager.csrf.encode(), body)
+        self.assertNotIn(self.manager.csrf.encode(), body)
+        self.assertIn(b'login-form', body)
 
 
 if __name__ == '__main__':

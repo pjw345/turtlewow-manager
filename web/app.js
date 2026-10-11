@@ -7,7 +7,7 @@ const descriptions = {
   build: 'Build the committed development revision with two compile jobs. Servers will stop and a cold backup will be taken first. They remain stopped after the build; activation and startup are separate steps.',
   activate: 'Stop services, take a cold backup and select the last verified build for the next startup. This does not start the server.'
 };
-let current = null, sending = false, pending = null;
+let current = null, sending = false, pending = null, csrf = null;
 function text(id, value) { $(id).textContent = value ?? '—'; }
 function bytes(n) { return (n / 1073741824).toFixed(1); }
 function timeLabel(value) { return value ? new Date(value).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—'; }
@@ -44,16 +44,25 @@ function render(data) {
   if(history.length) { activities.replaceChildren(); for(const op of history) {const row=element('div','activity-row'); const info=element('div'); info.append(element('strong','',(names[op.action]||op.action)+' · '+op.status),element('p','',op.message)); row.append(element('span','activity-dot '+op.status),info,element('span','activity-time',timeLabel(op.finished_at||op.started_at))); activities.append(row);} }
   text('operation-log',data.log||'No operation output yet.'); text('sample-time','Last sample '+timeLabel(data.sampled_at)+' · 5 second refresh');
 }
-async function poll() {
-  try { const response=await fetch('/api/status',{cache:'no-store'}); if(!response.ok)throw Error('Dashboard status unavailable'); render(await response.json()); }
-  catch(error) { $('connection').className='connection lost'; $('connection').lastChild.textContent=' Connection lost'; text('error-banner','Cannot reach the manager. Check your SSH tunnel; displayed values may be stale.'); $('error-banner').hidden=false; document.querySelectorAll('[data-action]').forEach(button=>button.disabled=true); }
+async function poll() { if(!csrf)return;
+  try { const response=await fetch('/admin/api/status',{cache:'no-store'}); if(response.status===401){signOut();return;} if(!response.ok)throw Error('Dashboard status unavailable'); render(await response.json()); }
+  catch(error) { $('connection').className='connection lost'; $('connection').lastChild.textContent=' Connection lost'; text('error-banner','Cannot reach the manager. Check the Ubuntu server connection; displayed values may be stale.'); $('error-banner').hidden=false; document.querySelectorAll('[data-action]').forEach(button=>button.disabled=true); }
 }
 document.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>{pending=button.dataset.action; text('confirm-title',names[pending]); text('confirm-description',descriptions[pending]); text('confirm-button',names[pending]); $('confirm-dialog').showModal();}));
 $('confirm-dialog').addEventListener('close',async()=>{
   if($('confirm-dialog').returnValue!=='confirm'||!pending)return;
   const action=pending; pending=null; sending=true; if(current)render(current);
-  try { const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':document.querySelector('meta[name="csrf-token"]').content},body:JSON.stringify({action})}); const result=await response.json(); if(!response.ok)throw Error(result.error||'Operation was not accepted'); toast('Operation started. Progress will appear below.'); }
+  try { const response=await fetch('/admin/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action})}); const result=await response.json(); if(!response.ok)throw Error(result.error||'Operation was not accepted'); toast('Operation started. Progress will appear below.'); }
   catch(error){toast(error.message);}finally{sending=false;await poll();}
 });
 $('toggle-log').addEventListener('click',()=>{const expanded=$('operation-log').hidden; $('operation-log').hidden=!expanded; $('toggle-log').setAttribute('aria-expanded',String(expanded)); text('toggle-log',expanded?'Hide output ↑':'Show output ↓');});
-poll();setInterval(poll,5000);
+function signOut(){csrf=null;current=null;document.body.classList.add('signed-out');}
+function signIn(value){csrf=value.csrf;document.body.classList.remove('signed-out');$('password').value='';poll();}
+$('login-form').addEventListener('submit',async event=>{
+  event.preventDefault();const button=event.submitter;button.disabled=true;text('login-error','');
+  try{const response=await fetch('/admin/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('username').value,password:$('password').value})});const result=await response.json();if(!response.ok)throw Error(result.error);signIn(result);}
+  catch(error){text('login-error',error.message);}finally{button.disabled=false;}
+});
+$('logout').addEventListener('click',async()=>{await fetch('/admin/api/logout',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:'{}'});signOut();});
+fetch('/admin/api/session',{cache:'no-store'}).then(response=>response.json()).then(value=>{if(value.authenticated)signIn(value);else if(value.setup_required)text('login-error','Create your dashboard account in MobaXTerm first.');}).catch(()=>text('login-error','Cannot reach the manager.'));
+setInterval(poll,5000);
