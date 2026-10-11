@@ -52,3 +52,13 @@ cover login, cookie attributes, CSRF, logout, expiry, credential reset and login
 rate limiting. Credentials and TLS private key remain outside the source tree.
 Realm services stayed stopped during this change; the previously recorded core
 shutdown SIGSEGV remains a separate unresolved core issue.
+
+## TurtleCraft-inspired theme (2026-10-11)
+
+Restyled login and dashboard from direct visual inspection of https://turtlecraft.gg/:
+dark stone colours, gold serif headings, metal frames, inset buttons and top
+navigation. Artwork remains original CSS; no remote fonts or image requests.
+Reviewed live HTTPS login and a clearly labelled static dashboard design preview
+at desktop and 390px widths. Narrow layout has no horizontal overflow. Backend,
+authentication, API paths and operation locking were unchanged. Dashboard account
+exists and Ubuntu user lingering is enabled.
