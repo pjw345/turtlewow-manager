@@ -1,9 +1,9 @@
 {
-  "deployment": "/home/paul/turtlewow",
-  "core": "/home/paul/development/tortoise-wow",
-  "packaging": "/home/paul/development/tortoise-docker",
-  "state": "/home/paul/.local/state/turtlewow-manager",
-  "backups": "/home/paul/turtlewow/backups/manager",
+  "deployment": "~/turtlewow",
+  "core": "~/development/tortoise-wow",
+  "packaging": "~/development/tortoise-docker",
+  "state": "~/.local/state/turtlewow-manager",
+  "backups": "~/turtlewow/backups/manager",
   "public_origin": "https://turtlewow-server",
   "port": 8787
 }

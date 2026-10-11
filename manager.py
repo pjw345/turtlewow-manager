@@ -106,9 +106,9 @@ def replace_image(path, image):
 class Manager:
     def __init__(self, config):
         self.config = config
-        self.deployment = pathlib.Path(config['deployment']).resolve()
-        self.core = pathlib.Path(config['core']).resolve()
-        self.packaging = pathlib.Path(config['packaging']).resolve()
+        self.deployment = pathlib.Path(config['deployment']).expanduser().resolve()
+        self.core = pathlib.Path(config['core']).expanduser().resolve()
+        self.packaging = pathlib.Path(config['packaging']).expanduser().resolve()
         self.state_dir = pathlib.Path(config['state']).expanduser().resolve()
         self.backups = pathlib.Path(config['backups']).expanduser().resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

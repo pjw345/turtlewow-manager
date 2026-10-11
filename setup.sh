@@ -15,5 +15,5 @@ fi
 cp "$project_dir/turtlewow-manager.service" "$HOME/.config/systemd/user/"
 systemctl --user daemon-reload
 systemctl --user enable --now turtlewow-manager.service
-echo 'Manager is listening on 127.0.0.1:8787. Use an SSH tunnel to open it.'
+echo 'Manager is listening on 127.0.0.1:8787. Create an admin account and configure HTTPS as described in README.md.'
 echo 'For startup before SSH login, enable lingering once: sudo loginctl enable-linger "$USER"'

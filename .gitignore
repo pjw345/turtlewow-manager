@@ -3,3 +3,16 @@ __pycache__/
 .env
 config.json
 *.log
+
+# Runtime secrets and private operational data belong outside this checkout.
+.env.*
+!.env.example
+account.json
+*.key
+*.pem
+*.p12
+*.pfx
+/tls/
+/backups/
+/state/
+operations.json

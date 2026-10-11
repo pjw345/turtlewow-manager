@@ -78,6 +78,28 @@ class Sandbox(manager.Manager):
         return '/safe/backup'
 
 
+class ConfigurationPathsTest(unittest.TestCase):
+    def test_home_relative_paths_use_the_operator_home(self):
+        with tempfile.TemporaryDirectory() as home:
+            config = json.loads((manager.ROOT / 'config.example.json').read_text())
+            deployment = pathlib.Path(home) / 'turtlewow'
+            deployment.mkdir()
+            (deployment / '.env').write_text('')
+            with patch.dict('os.environ', {'HOME': home}):
+                control = manager.Manager(config)
+            expected = {
+                'deployment': 'turtlewow',
+                'core': 'development/tortoise-wow',
+                'packaging': 'development/tortoise-docker',
+                'state_dir': '.local/state/turtlewow-manager',
+                'backups': 'turtlewow/backups/manager',
+            }
+            for attribute, suffix in expected.items():
+                with self.subTest(attribute=attribute):
+                    self.assertEqual(getattr(control, attribute), (pathlib.Path(home) / suffix).resolve())
+            self.assertTrue(control.state_dir.is_dir())
+
+
 class OperationsTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
