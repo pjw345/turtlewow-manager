@@ -120,6 +120,9 @@ class Manager:
         self.count_sample = None
         self.count_container = None
         self.last_count_request = 0
+        self.source_checked_at = None
+        self.source_revision = None
+        self.source_error = None
         self.fd = None
         self.operation_thread = None
         self.log_path = None
@@ -295,13 +298,68 @@ class Manager:
         self.compose('up', '-d', 'realmd', 'mangosd', timeout=240)
         self.record('Containers started. World initialization can take several minutes; watch readiness below.')
 
+    def latest_source(self, force=False):
+        # Reading remote refs does not move the checkout or disturb a build.
+        with self.mutex:
+            if force or self.source_checked_at is None or time.monotonic() - self.source_checked_at >= 60:
+                try:
+                    branch = self.config.get('core_branch', 'playerbots-development')
+                    ref = 'refs/heads/' + branch
+                    output = self.run(['git', '-C', str(self.core), 'ls-remote', '--exit-code',
+                                       'origin', ref], timeout=10)
+                    rows = [line.split() for line in output.splitlines()]
+                    matches = [row[0] for row in rows if len(row) == 2 and row[1] == ref
+                               and re.fullmatch(r'[0-9a-f]{40}', row[0])]
+                    if len(matches) != 1:
+                        raise RuntimeError('Cannot identify the latest development revision.')
+                    self.source_revision, self.source_error = matches[0], None
+                except Exception:
+                    self.source_revision = None
+                    self.source_error = 'Cannot check GitHub for the latest source. Retrying shortly.'
+                self.source_checked_at = time.monotonic()
+            return self.source_revision, self.source_error
+
+    def build_availability(self, deployed_revision, force=False):
+        latest, error = self.latest_source(force=force)
+        if error:
+            return {'latest_revision': None, 'build_available': False, 'build_reason': error}
+        if latest == deployed_revision:
+            reason, available = 'The server already uses the latest source.', False
+        elif (self.read_state().get('build') or {}).get('revision') == latest:
+            reason, available = 'The latest source is already built. Activate it and start the server.', False
+        else:
+            reason, available = 'New source is available to build.' if deployed_revision else 'Latest source is available to build.', True
+        return {'latest_revision': latest, 'build_available': available, 'build_reason': reason}
+
+    def deployed_revision(self):
+        world = self.containers().get('mangosd')
+        revision = (world or {}).get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision')
+        if revision:
+            return revision
+        # Containers may have been removed during activation; use the selected
+        # local image as the baseline until the next server startup.
+        image = env_values(self.deployment / '.env').get('TURTLE_IMAGE')
+        if image:
+            try:
+                revision = self.run(['docker', 'image', 'inspect', '--format',
+                                     '{{ index .Config.Labels "org.opencontainers.image.revision" }}', image])
+                if re.fullmatch(r'[0-9a-f]{40}', revision):
+                    return revision
+            except RuntimeError:
+                pass
+        return None
+
     def build(self, revision=None):
         self.build_progress('Checking source')
         self.assert_no_external_build()
         for repo in (self.core, self.packaging):
             if self.run(['git', '-C', str(repo), 'status', '--porcelain']):
                 raise RuntimeError('A development checkout has uncommitted changes; commit and push before building.')
-        revision = revision or self.run(['git', '-C', str(self.core), 'rev-parse', 'HEAD'])
+        if revision is None:
+            availability = self.build_availability(self.deployed_revision(), force=True)
+            if not availability['build_available']:
+                raise RuntimeError(availability['build_reason'])
+            revision = availability['latest_revision']
         if not re.fullmatch(r'[0-9a-f]{40}', revision):
             raise RuntimeError('Build revision must be a full 40-character commit SHA.')
         self.run(['git', '-C', str(self.core), 'fetch', 'origin', revision], timeout=90)
@@ -475,6 +533,7 @@ class Manager:
                                  'disk': {'total': disk.total, 'free': disk.free},
                                  'memory': {'total': total, 'used': total - available},
                                  'load': os.getloadavg()[0], 'error': None}
+                self.snapshot.update(self.build_availability(version or self.deployed_revision()))
                 failures = [f'{name} exited with code {service["exit_code"]}' for name, service in services.items()
                             if service['state'] == 'exited' and service['exit_code'] not in (None, 0)]
                 self.snapshot['warning'] = '. '.join(failures) + '. Inspect server logs before restarting.' if failures else None
