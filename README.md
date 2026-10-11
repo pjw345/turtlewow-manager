@@ -217,3 +217,29 @@ definition and `SystemConfig.h` include live in `PlayerbotAIConfig.cpp`. Older
 core revisions with that include in the shared header legitimately invalidate
 the entire bot PCH on every new commit. Caching cannot bypass that dependency.
 The incremental fixture includes PCH consumers and private revision metadata.
+
+
+### Build cache retention on this VM
+
+The retained native tree currently occupies about 18 GB (objects, archives, PCH,
+source and compiler results). The compiler-result subdirectory alone is capped
+at 3 GB. Docker's default GC can remove cache mounts after 48 hours; default
+image cleanup is not sufficient to preserve an incremental baseline.
+
+Our VM uses a custom Docker daemon GC policy restricted to `type=regular`, so
+native `exec.cachemount` records are preserved. It reserves 12 GB of layer cache,
+uses a 30 GB cache ceiling and a 25 GB free-space target for eligible cleanup.
+Protected mounts are additional non-prunable data, so those thresholds do not
+guarantee a total disk cap. Monitor VM disk space; deleting build cache explicitly
+requires a later full compilation. Scheduled server-image cleanup stays enabled.
+
+The example `deploy/docker-builder-gc.json` in turtlewow-manager contains only
+the builder settings. Merge them into an existing `/etc/docker/daemon.json`,
+preserving logging and other settings. Choose limits appropriate to your disk.
+Validate with `sudo dockerd --validate --config-file /etc/docker/daemon.json`.
+Applying builder GC changes requires restarting Docker while the realm is stopped
+and no manager operation is running; SIGHUP does not update builder GC. Confirm
+the actual filters/limits with `docker buildx inspect --bootstrap` afterward.
+For this installed Docker version the filter is the positive `type=regular`;
+a negative `type!=...` daemon filter is not translated into a BuildKit filter.
+See [Docker GC documentation](https://docs.docker.com/build/cache/garbage-collection/).
