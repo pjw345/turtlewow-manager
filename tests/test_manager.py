@@ -1,0 +1,252 @@
+import http.client
+import json
+import multiprocessing
+import pathlib
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+import manager
+
+
+REVISION = 'a' * 40
+
+
+def try_other_process(path, queue):
+    try:
+        with manager.operation_lock(pathlib.Path(path)):
+            queue.put('acquired')
+    except RuntimeError:
+        queue.put('blocked')
+
+
+class Sandbox(manager.Manager):
+    def __init__(self, root):
+        deployment = root / 'deployment'
+        deployment.mkdir()
+        (deployment / '.env').write_text('DB_PASSWORD=very-secret\nTURTLE_IMAGE=tortoise-wow:playerbots-12345678\n')
+        super().__init__({'deployment': str(deployment), 'core': str(root / 'core'),
+                          'packaging': str(root / 'packaging'), 'state': str(root / 'state'),
+                          'backups': str(root / 'backups')})
+        self.calls = []
+        self.running = True
+        self.fail_stop = False
+        self.fail_build = False
+        self.fail_backup = False
+        self.wrong_revision = False
+
+    def assert_no_external_build(self):
+        pass
+
+    def run(self, args, **kwargs):
+        if args[0] == 'git':
+            if 'status' in args:
+                return ''
+            return REVISION
+        if args[:2] == ['docker', 'build']:
+            self.calls.append('compile')
+            if self.fail_build:
+                raise RuntimeError('Compilation failed')
+            return ''
+        if args[:2] == ['docker', 'run']:
+            self.calls.append('verify')
+            return 'b' * 40 if self.wrong_revision else REVISION
+        raise AssertionError(args)
+
+    def compose(self, *args, **kwargs):
+        if args[0] == 'stop':
+            self.calls.append('stop')
+            if not self.fail_stop:
+                self.running = False
+        if args[0] == 'up':
+            self.calls.append('start')
+            self.running = True
+        return ''
+
+    def containers(self):
+        return {'mangosd': {'State': {'Running': self.running}}}
+
+    def cold_backup(self):
+        self.calls.append('backup')
+        assert not self.running
+        if self.fail_backup:
+            raise RuntimeError('Archive failed')
+        return '/safe/backup'
+
+
+class OperationsTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.manager = Sandbox(pathlib.Path(self.temp.name))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_build_stops_and_backs_up_before_compilation(self):
+        self.manager.execute('build')
+        self.assertEqual(self.manager.calls, ['stop', 'backup', 'compile', 'verify'])
+        self.assertFalse(self.manager.running)
+        self.assertEqual(self.manager.read_state()['build']['revision'], REVISION)
+        self.assertIn('12345678', (self.manager.deployment / '.env').read_text())
+
+    def test_failed_shutdown_never_compiles(self):
+        self.manager.fail_stop = True
+        with self.assertRaisesRegex(RuntimeError, 'still running'):
+            self.manager.execute('build')
+        self.assertEqual(self.manager.calls, ['stop'])
+        self.assertIsNone(self.manager.read_state()['build'])
+
+    def test_failed_backup_never_compiles_or_restarts(self):
+        self.manager.fail_backup = True
+        with self.assertRaisesRegex(RuntimeError, 'Archive failed'):
+            self.manager.execute('build')
+        self.assertEqual(self.manager.calls, ['stop', 'backup'])
+        self.assertFalse(self.manager.running)
+
+    def test_failed_build_leaves_stopped_and_does_not_select_image(self):
+        self.manager.fail_build = True
+        with self.assertRaisesRegex(RuntimeError, 'Compilation failed'):
+            self.manager.execute('build')
+        self.assertFalse(self.manager.running)
+        state = self.manager.read_state()
+        self.assertEqual(state['history'][0]['status'], 'failed')
+        self.assertIsNone(state['build'])
+        self.assertFalse(manager.lock_busy(self.manager.lock_path))
+
+    def test_wrong_embedded_source_rejects_build(self):
+        self.manager.wrong_revision = True
+        with self.assertRaisesRegex(RuntimeError, 'source SHA'):
+            self.manager.execute('build')
+        self.assertIsNone(self.manager.read_state()['build'])
+
+    def test_start_blocked_by_build_lock_in_another_process(self):
+        context = multiprocessing.get_context('fork')
+        queue = context.Queue()
+        with manager.operation_lock(self.manager.lock_path):
+            process = context.Process(target=try_other_process, args=(str(self.manager.lock_path), queue))
+            process.start()
+            self.assertEqual(queue.get(timeout=3), 'blocked')
+            process.join(timeout=3)
+            with self.assertRaises(RuntimeError):
+                self.manager.execute('start')
+        self.assertNotIn('start', self.manager.calls)
+
+    def test_http_submission_reserves_lock_before_worker_starts(self):
+        entered, release = threading.Event(), threading.Event()
+        def held_start():
+            entered.set()
+            release.wait(3)
+        self.manager.start = held_start
+        self.manager.submit('start')
+        self.assertTrue(entered.wait(2))
+        with self.assertRaisesRegex(RuntimeError, 'Another operation'):
+            self.manager.submit('build')
+        release.set()
+        deadline = time.monotonic() + 3
+        while manager.lock_busy(self.manager.lock_path) and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertFalse(manager.lock_busy(self.manager.lock_path))
+
+    def test_backup_restores_previously_running_services(self):
+        self.manager.execute('backup')
+        self.assertEqual(self.manager.calls, ['stop', 'backup', 'start'])
+        self.assertTrue(self.manager.running)
+
+    def test_failed_backup_does_not_restart(self):
+        self.manager.fail_backup = True
+        with self.assertRaises(RuntimeError):
+            self.manager.execute('backup')
+        self.assertFalse(self.manager.running)
+
+    def test_native_counts_do_not_subtract_free_floating_bots(self):
+        counts = manager.parse_counts('Sessions online: 2\nBots online: 12 (active: 9)')
+        self.assertEqual(counts, {'users': 2, 'bots': 12, 'active_bots': 9})
+        self.assertIsNone(manager.parse_counts('World server starting'))
+
+    def test_image_selection_preserves_password_and_rejects_arbitrary_images(self):
+        path = self.manager.deployment / '.env'
+        manager.replace_image(path, 'tortoise-wow:playerbots-aaaaaaaa')
+        self.assertIn('DB_PASSWORD=very-secret', path.read_text())
+        with self.assertRaises(RuntimeError):
+            manager.replace_image(path, 'evil:latest')
+
+    def test_operation_output_redacts_password(self):
+        self.manager.start = lambda: self.manager.record('failure: very-secret')
+        self.manager.execute('start')
+        self.assertNotIn('very-secret', self.manager.status()['log'])
+
+    def test_active_initializer_is_not_interrupted(self):
+        self.manager.containers = lambda: {'db-init': {'State': {'Running': True}}}
+        with self.assertRaisesRegex(RuntimeError, 'initialization'):
+            self.manager.execute('build')
+        self.assertEqual(self.manager.calls, [])
+
+    def test_wrong_build_source_cannot_change_deployment(self):
+        state = self.manager.read_state()
+        state['build'] = {'image': 'tortoise-wow:playerbots-aaaaaaaa', 'revision': REVISION}
+        manager.atomic_json(self.manager.state_path, state)
+        self.manager.wrong_revision = True
+        with self.assertRaisesRegex(RuntimeError, 'Build image changed'):
+            self.manager.execute('activate')
+        self.assertIn('12345678', (self.manager.deployment / '.env').read_text())
+        self.assertNotIn('stop', self.manager.calls)
+
+    def test_unique_build_tag_is_accepted_but_arbitrary_suffix_is_not(self):
+        path = self.manager.deployment / '.env'
+        manager.replace_image(path, 'tortoise-wow:playerbots-aaaaaaaa-20261011103000-ab12')
+        with self.assertRaises(RuntimeError):
+            manager.replace_image(path, 'tortoise-wow:playerbots-aaaaaaaa-malicious')
+
+
+class HttpTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.manager = Sandbox(pathlib.Path(self.temp.name))
+        self.server = manager.http.server.ThreadingHTTPServer(('127.0.0.1', 0), manager.Handler)
+        self.server.manager = self.manager
+        self.port = self.server.server_port
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+        self.temp.cleanup()
+
+    def request(self, method, path, headers=None):
+        connection = http.client.HTTPConnection('127.0.0.1', self.port)
+        connection.request(method, path, json.dumps({'action': 'start'}) if method == 'POST' else None, headers or {})
+        response = connection.getresponse()
+        body = response.read()
+        status = response.status
+        connection.close()
+        return status, body
+
+    def test_rebinding_host_rejected(self):
+        self.assertEqual(self.request('GET', '/api/status', {'Host': 'evil.example'})[0], 403)
+
+    def test_cross_origin_and_missing_csrf_cannot_start(self):
+        base = {'Content-Type': 'application/json', 'Origin': f'http://127.0.0.1:{self.port}'}
+        self.assertEqual(self.request('POST', '/api/action', base)[0], 403)
+        base.update({'Origin': 'http://evil.example', 'X-CSRF-Token': self.manager.csrf})
+        self.assertEqual(self.request('POST', '/api/action', base)[0], 403)
+        self.assertEqual(self.manager.calls, [])
+
+    def test_same_origin_csrf_action_rejected_when_locked(self):
+        headers = {'Content-Type': 'application/json', 'Origin': f'http://127.0.0.1:{self.port}', 'X-CSRF-Token': self.manager.csrf}
+        with manager.operation_lock(self.manager.lock_path):
+            self.assertEqual(self.request('POST', '/api/action', headers)[0], 409)
+        self.assertEqual(self.manager.calls, [])
+
+    def test_frontend_has_security_headers_and_no_placeholder_token(self):
+        status, body = self.request('GET', '/')
+        self.assertEqual(status, 200)
+        self.assertNotIn(b'__CSRF__', body)
+        self.assertIn(self.manager.csrf.encode(), body)
+
+
+if __name__ == '__main__':
+    unittest.main()

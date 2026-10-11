@@ -1,0 +1,8 @@
+{
+  "deployment": "/home/paul/turtlewow",
+  "core": "/home/paul/development/tortoise-wow",
+  "packaging": "/home/paul/development/tortoise-docker",
+  "state": "/home/paul/.local/state/turtlewow-manager",
+  "backups": "/home/paul/turtlewow/backups/manager",
+  "port": 8787
+}

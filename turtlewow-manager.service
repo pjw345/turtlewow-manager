@@ -1,0 +1,15 @@
+[Unit]
+Description=TurtleWoW realm control room
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/development/turtlewow-manager
+ExecStart=/usr/bin/python3 %h/development/turtlewow-manager/manager.py serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
