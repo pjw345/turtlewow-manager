@@ -101,6 +101,12 @@ certificate trust step too. The certificate lasts 825 days; regenerate it before
 expiry, restart the proxy and trust the replacement. Remove the old certificate
 from Windows after replacement.
 
+## Latest source availability
+
+The dashboard checks the configured core branch (core_branch, default playerbots-development) on GitHub every minute. Build Latest Source is disabled when the deployed revision matches that branch, when the same revision already has a verified build awaiting activation, or when the remote revision cannot be checked. It displays the reason and the latest GitHub commit separately from the local checkout.
+
+Before a default build, the manager checks the remote again and fetches that exact commit. This prevents stale checkouts and duplicate requests from stopping the server or recompiling unchanged source. Explicit CLI builds with a full commit SHA remain available for intentional rebuilds or older revisions.
+
 ## Operations and build exclusion
 
 Every supported start/stop/build/backup/activation action takes the same Linux

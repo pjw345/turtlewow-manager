@@ -37,6 +37,10 @@ class Sandbox(manager.Manager):
         self.fail_backup = False
         self.wrong_revision = False
         self.stop_exit = 0
+        self.remote_revision = REVISION
+        self.remote_error = False
+        self.source_requests = 0
+        self.current_revision = 'c' * 40
 
     def assert_no_external_build(self):
         pass
@@ -45,7 +49,14 @@ class Sandbox(manager.Manager):
         if args[0] == 'git':
             if 'status' in args:
                 return ''
+            if 'ls-remote' in args:
+                self.source_requests += 1
+                if self.remote_error:
+                    raise RuntimeError('GitHub unavailable')
+                return self.remote_revision + '\t' + args[-1]
             return REVISION
+        if args[:3] == ['docker', 'image', 'inspect']:
+            return self.current_revision
         if args[:2] == ['docker', 'build']:
             self.calls.append('compile')
             self.compile_args = list(args)
@@ -54,7 +65,8 @@ class Sandbox(manager.Manager):
             return ''
         if args[:2] == ['docker', 'run']:
             self.calls.append('verify')
-            return 'b' * 40 if self.wrong_revision else REVISION
+            return 'b' * 40 if self.wrong_revision else next(
+                value.split('=', 1)[1] for value in self.compile_args if value.startswith('SOURCE_COMMIT='))
         raise AssertionError(args)
 
     def compose(self, *args, **kwargs):
@@ -107,6 +119,45 @@ class OperationsTest(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_default_build_uses_remote_tip_even_with_stale_checkout(self):
+        self.manager.remote_revision = 'd' * 40
+        self.manager.execute('build')
+        self.assertIn('SOURCE_COMMIT=' + 'd' * 40, self.manager.compile_args)
+        self.assertEqual(self.manager.read_state()['build']['revision'], 'd' * 40)
+
+    def test_same_revision_refuses_build_before_shutdown(self):
+        self.manager.current_revision = REVISION
+        with self.assertRaisesRegex(RuntimeError, 'already uses the latest'):
+            self.manager.execute('build')
+        self.assertEqual(self.manager.calls, [])
+        self.assertTrue(self.manager.running)
+
+    def test_verified_latest_build_refuses_duplicate_before_activation(self):
+        manager.atomic_json(self.manager.state_path, {'build': {'revision': REVISION}})
+        with self.assertRaisesRegex(RuntimeError, 'already built'):
+            self.manager.execute('build')
+        self.assertEqual(self.manager.calls, [])
+
+    def test_unreachable_remote_refuses_build_without_stopping(self):
+        self.manager.remote_error = True
+        with self.assertRaisesRegex(RuntimeError, 'Cannot check GitHub'):
+            self.manager.execute('build')
+        self.assertEqual(self.manager.calls, [])
+
+    def test_remote_checks_are_cached_and_failure_disables_stale_availability(self):
+        self.assertTrue(self.manager.build_availability('c' * 40)['build_available'])
+        self.assertFalse(self.manager.build_availability(REVISION)['build_available'])
+        self.assertEqual(self.manager.source_requests, 1)
+        self.manager.remote_error = True
+        self.manager.source_checked_at -= 61
+        result = self.manager.build_availability('c' * 40)
+        self.assertFalse(result['build_available'])
+        self.assertIsNone(result['latest_revision'])
+
+    def test_missing_branch_is_not_treated_as_new_source(self):
+        self.manager.remote_revision = 'invalid'
+        self.assertFalse(self.manager.build_availability(None)['build_available'])
 
     def test_build_stops_and_backs_up_before_compilation(self):
         self.manager.execute('build')

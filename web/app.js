@@ -4,7 +4,7 @@ const descriptions = {
   start: 'Start the database, login and world services using the selected image. Initialization may take a few minutes.',
   stop: 'Stop the world, login and database services cleanly. Connected players will be disconnected; saved data is retained.',
   backup: 'Stop the services, archive the database and configuration, and verify archive checksums. Previously running services will be restarted after success.',
-  build: 'Build the committed development revision with two compile jobs. Servers will stop and a cold backup will be taken first. They remain stopped after the build; activation and startup are separate steps.',
+  build: 'Build the latest development revision from GitHub with two compile jobs. Servers will stop and a cold backup will be taken first. They remain stopped after the build; activation and startup are separate steps.',
   activate: 'Stop services, take a cold backup and select the last verified build for the next startup. This does not start the server.'
 };
 let current = null, sending = false, pending = null, csrf = null;
@@ -42,7 +42,9 @@ function render(data) {
   if(progress?.percent!=null) $('build-progress-bar').value=progress.percent;
   else $('build-progress-bar').removeAttribute('value');
   $('available-build').hidden=!data.build || data.build.image===data.selected_image;
-  document.querySelectorAll('[data-action]').forEach(button => {button.disabled=sending||data.busy||!!data.error||(button.dataset.action==='start'&&ready)||(button.dataset.action==='activate'&&!data.build);});
+  text('build-source-status',data.build_reason||'Checking GitHub for newer source…');
+  text('latest-revision',data.latest_revision?.slice(0,12));
+  document.querySelectorAll('[data-action]').forEach(button => {button.disabled=sending||data.busy||!!data.error||(button.dataset.action==='build'&&data.build_available!==true)||(button.dataset.action==='start'&&ready)||(button.dataset.action==='activate'&&!data.build);});
   const list=$('backup-list');
   if(data.backups?.length) { list.replaceChildren(); for(const backup of data.backups.slice(0,4)) {const row=element('div','backup-row'); row.append(element('span','backup-icon','▤')); const info=element('div'); info.append(element('strong','',backup.name),element('p','','Database · marker · configuration')); row.append(info,element('span','backup-size',bytes(backup.size)+' GB')); list.append(row);} }
   const history=[...(data.active?[data.active]:[]),...(data.history||[])].slice(0,6), activities=$('activity-list');
