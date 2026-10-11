@@ -48,7 +48,9 @@ nano ~/.config/turtlewow-manager/config.json
 bash setup.sh
 ```
 
-The example paths match our deployment. Use this checkout path or adapt the
+The example paths use `~` for the Ubuntu account running the dashboard; all
+five directory settings expand it to that account's home directory. Adjust the
+paths if your deployment uses a different layout. Use this checkout path or adapt the
 service template. Config/state/backup directories are outside Git. `setup.sh`
 preserves an existing configuration. The Compose deployment and containers are
 not modified by installation; installing the dashboard does not start the realm.
@@ -84,6 +86,7 @@ certificate and matching configuration.
 ## Open from Windows
 
 Ensure `turtlewow-server` resolves to your VM; reserve its IP in your router.
+Replace `YOUR_UBUNTU_USER` below with your Ubuntu login name.
 Copy only the public certificate using your trusted SSH connection:
 
 ```powershell
@@ -246,3 +249,17 @@ the actual filters/limits with `docker buildx inspect --bootstrap` afterward.
 For this installed Docker version the filter is the positive `type=regular`;
 a negative `type!=...` daemon filter is not translated into a BuildKit filter.
 See [Docker GC documentation](https://docs.docker.com/build/cache/garbage-collection/).
+
+## Licence and source publication
+
+The dashboard source is licensed under the [MIT licence](LICENSE). The game
+server, packaging images and other external dependencies retain their own
+licences. The theme uses original CSS rather than copied TurtleCraft artwork.
+
+Publishing this source does not publish your running dashboard or its data.
+Keep the management endpoint on your trusted LAN and retain dashboard login.
+Your real configuration and `account.json` belong under
+`~/.config/turtlewow-manager`, TLS keys under its `tls` directory, and operation
+logs/state/backups outside the checkout. Do not commit those files, database
+archives, tokens or passwords. `.gitignore` is a guard, not a secret scanner;
+review every staged change, and use sanitised examples in issues and CI output.
