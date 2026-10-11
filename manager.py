@@ -202,15 +202,23 @@ class Manager:
         return items
 
     def shutdown(self):
-        initializer = self.containers().get('db-init')
+        before = self.containers()
+        initializer = before.get('db-init')
         if initializer and initializer['State']['Running']:
             raise RuntimeError('Database initialization is still running. Wait before stopping, backing up or building.')
         self.record('Stopping world, login and database services cleanly…')
         self.compose('stop', '-t', '120', 'mangosd', 'realmd', 'db', timeout=180)
-        return self.stopped()
+        after = self.stopped()
+        for service in ('mangosd', 'realmd', 'db'):
+            item = after.get(service)
+            if item and before.get(service, {}).get('State', {}).get('Running') and item['State'].get('ExitCode', 0) != 0:
+                raise RuntimeError(f'{service} stopped with exit code {item["State"]["ExitCode"]}. Inspect server logs before continuing.')
+        return after
 
     def cold_backup(self):
         items = self.stopped()
+        if items.get('db', {}).get('State', {}).get('ExitCode', 0) != 0:
+            raise RuntimeError('Database did not stop normally. Inspect/recover it before taking a physical backup.')
         self.backups.mkdir(parents=True, exist_ok=True, mode=0o700)
         target = self.backups / (dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-') + secrets.token_hex(3))
         target.mkdir(mode=0o700)
@@ -238,7 +246,7 @@ class Manager:
                 for leaf in ('.env', 'docker-compose.yml', 'config', 'docker'):
                     archive.add(self.deployment / leaf, arcname=leaf)
             atomic_json(target / 'manifest.json', {'created_at': now(), 'volumes': volumes,
-                        'source': self.snapshot.get('version'), 'image': items['mangosd']['Image'],
+                        'source': items['mangosd']['Config'].get('Labels', {}).get('org.opencontainers.image.revision'), 'image': items['mangosd']['Image'],
                         'mariadb_image': items['db']['Image'], 'kind': 'cold physical backup'})
             hashes = []
             for leaf in ('db-data.tar.gz', 'init-marker.tar.gz', 'deployment-config.tar.gz'):
@@ -370,7 +378,9 @@ class Manager:
                 for service in ('db', 'realmd', 'mangosd'):
                     item = items.get(service)
                     services[service] = {'state': item['State']['Status'] if item else 'missing',
-                                         'ready': False, 'restarts': item.get('RestartCount', 0) if item else 0}
+                                         'ready': False, 'restarts': item.get('RestartCount', 0) if item else 0,
+                                         'exit_code': item['State'].get('ExitCode') if item else None,
+                                         'oom_killed': item['State'].get('OOMKilled', False) if item else False}
                     if item and service == 'db':
                         services[service]['ready'] = item['State'].get('Health', {}).get('Status') == 'healthy'
                 env = env_values(self.deployment / '.env')
@@ -432,6 +442,9 @@ class Manager:
                                  'disk': {'total': disk.total, 'free': disk.free},
                                  'memory': {'total': total, 'used': total - available},
                                  'load': os.getloadavg()[0], 'error': None}
+                failures = [f'{name} exited with code {service["exit_code"]}' for name, service in services.items()
+                            if service['state'] == 'exited' and service['exit_code'] not in (None, 0)]
+                self.snapshot['warning'] = '. '.join(failures) + '. Inspect server logs before restarting.' if failures else None
             except Exception as exc:
                 self.snapshot = {'sampled_at': now(), 'services': {}, 'counts': None, 'error': self.redact(str(exc))}
             self.stop_poll.wait(5)

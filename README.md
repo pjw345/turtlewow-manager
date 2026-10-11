@@ -17,6 +17,12 @@ migrations or frontend build step. Docker Engine/Compose must already be install
 - Start, clean stop, cold backup, source-pinned build and separate build activation.
 - Durable operation history and logs, archive checksums and recent backups.
 
+Nonzero container exit codes are displayed prominently. If a requested shutdown
+ends with an error, that operation fails and a build stops before backup/compile.
+The manager does not repair core crashes. A later explicit build can operate on
+an already stopped world to build a fix, but physical backups require a normally
+stopped database.
+
 The manager binds **127.0.0.1 only**. Access uses SSH authentication and a tunnel;
 there is no public management port or separate dashboard password. The VM's
 trusted local users can access it, and the service account has Docker privileges.

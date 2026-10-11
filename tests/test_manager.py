@@ -36,6 +36,7 @@ class Sandbox(manager.Manager):
         self.fail_build = False
         self.fail_backup = False
         self.wrong_revision = False
+        self.stop_exit = 0
 
     def assert_no_external_build(self):
         pass
@@ -66,7 +67,7 @@ class Sandbox(manager.Manager):
         return ''
 
     def containers(self):
-        return {'mangosd': {'State': {'Running': self.running}}}
+        return {'mangosd': {'State': {'Running': self.running, 'ExitCode': self.stop_exit if not self.running else 0}}}
 
     def cold_backup(self):
         self.calls.append('backup')
@@ -104,6 +105,18 @@ class OperationsTest(unittest.TestCase):
             self.manager.execute('build')
         self.assertEqual(self.manager.calls, ['stop', 'backup'])
         self.assertFalse(self.manager.running)
+
+    def test_stop_segfault_aborts_build_and_is_recorded_as_failure(self):
+        self.manager.stop_exit = 139
+        with self.assertRaisesRegex(RuntimeError, 'exit code 139'):
+            self.manager.execute('build')
+        self.assertEqual(self.manager.calls, ['stop'])
+        self.assertEqual(self.manager.read_state()['history'][0]['status'], 'failed')
+
+    def test_unclean_database_exit_refuses_physical_backup(self):
+        self.manager.containers = lambda: {'db': {'State': {'Running': False, 'ExitCode': 137}}}
+        with self.assertRaisesRegex(RuntimeError, 'Database did not stop normally'):
+            manager.Manager.cold_backup(self.manager)
 
     def test_failed_build_leaves_stopped_and_does_not_select_image(self):
         self.manager.fail_build = True
