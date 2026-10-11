@@ -4,5 +4,6 @@
   "packaging": "/home/paul/development/tortoise-docker",
   "state": "/home/paul/.local/state/turtlewow-manager",
   "backups": "/home/paul/turtlewow/backups/manager",
+  "public_origin": "https://turtlewow-server",
   "port": 8787
 }

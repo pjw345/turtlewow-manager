@@ -1,0 +1,20 @@
+services:
+  https:
+    image: nginx:stable-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    container_name: turtlewow-manager-https
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${HOME}/.config/turtlewow-manager/tls:/etc/nginx/tls:ro
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: '3'

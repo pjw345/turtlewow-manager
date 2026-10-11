@@ -11,5 +11,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m unittest discover -s tests -v
-      - run: python -m py_compile manager.py
-      - run: bash -n setup.sh turtlewowctl
+      - run: python -m py_compile manager.py auth.py
+      - run: bash -n setup.sh turtlewowctl deploy/install-https.sh

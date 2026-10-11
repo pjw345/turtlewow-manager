@@ -2,16 +2,26 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="csrf-token" content="__CSRF__">
+
   <title>TurtleWoW · Control Room</title>
-  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+  <link rel="stylesheet" href="/admin/style.css"><script src="/admin/app.js" defer></script>
 </head>
-<body>
+<body class="signed-out">
+  <section id="login-view" class="login-view">
+    <form id="login-form" class="login-card">
+      <span class="brand-mark">T</span><div class="eyebrow">TURTLEWOW CONTROL ROOM</div>
+      <h1>Welcome back.</h1><p>Sign in to manage your realm.</p>
+      <label for="username">Dashboard username</label><input id="username" name="username" autocomplete="username" required>
+      <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+      <p id="login-error" role="alert"></p><button type="submit" class="button primary">Sign in →</button>
+      <p class="login-note">Private realm management · Encrypted connection</p>
+    </form>
+  </section>
   <aside class="sidebar">
     <a class="brand" href="#overview" aria-label="TurtleWoW home"><span class="brand-mark">T</span><span>TURTLE<span class="brand-small">CONTROL ROOM</span></span></a>
     <div class="nav-caption">YOUR REALM</div>
     <nav><a class="active" href="#overview"><span>◈</span> Overview</a><a href="#operations"><span>↗</span> Operations</a><a href="#backups"><span>▤</span> Backups</a><a href="#activity"><span>≋</span> Activity</a></nav>
-    <div class="sidebar-bottom"><span class="secure-dot"></span> Private connection<p>Ubuntu · Hyper-V<br>Docker Engine</p><a href="https://github.com/pjw345/turtlewow-manager" target="_blank" rel="noreferrer">Project documentation ↗</a></div>
+    <div class="sidebar-bottom"><span class="secure-dot"></span> Private connection<p>Ubuntu · Hyper-V<br>Docker Engine</p><a href="https://github.com/pjw345/turtlewow-manager" target="_blank" rel="noreferrer">Project documentation ↗</a><button id="logout" class="logout">Sign out</button></div>
   </aside>
   <main>
     <header><div class="breadcrumbs">REALM MANAGEMENT <span>/</span> Overview</div><div class="connection" id="connection"><span></span> Connecting</div></header>

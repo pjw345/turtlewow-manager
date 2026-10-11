@@ -23,12 +23,12 @@ The manager does not repair core crashes. A later explicit build can operate on
 an already stopped world to build a fix, but physical backups require a normally
 stopped database.
 
-The manager binds **127.0.0.1 only**. Access uses SSH authentication and a tunnel;
-there is no public management port or separate dashboard password. The VM's
-trusted local users can access it, and the service account has Docker privileges.
-Requests are restricted to localhost Host headers, same-origin JSON and a CSRF
-token. Do not proxy or expose this service publicly without adding authenticated
-TLS access. Game ports remain controlled by the existing deployment.
+Open **https://turtlewow-server/admin** with a separate dashboard login. Nginx
+provides HTTPS on the VM and proxies Python on loopback. Salted PBKDF2-SHA256
+password hashes stay outside Git. Sessions use Secure, HttpOnly, SameSite cookies,
+per-session CSRF tokens, eight-hour expiry and a thirty-minute idle timeout.
+Login attempts are limited. The management account can operate Docker; restrict
+HTTPS to your trusted LAN. Game ports use the existing deployment.
 
 ## Install on the Ubuntu VM
 
@@ -58,21 +58,42 @@ systemctl --user status turtlewow-manager
 ```
 
 Lingering is a one-time host setting requiring administrator permission.
-Without it, availability depends on your user session. SSH sessions and the VM
-must be running for a Windows tunnel to work.
+Without it, availability depends on your Ubuntu user session.
+
+Create a dashboard account and enable HTTPS from the checkout. Run separately:
+
+```bash
+python3 manager.py create-admin
+```
+
+```bash
+bash deploy/install-https.sh
+```
+
+Enter the username/password interactively. To reset credentials, rerun
+`create-admin`; existing sessions are invalidated. This account is separate from
+Ubuntu and game accounts. The HTTPS proxy restarts independently of the realm.
+`public_origin` in the manager config and `server_name` / forwarded Host in
+`deploy/nginx.conf` must match your HTTPS hostname. The certificate script uses
+`turtlewow-server` and its `.localdomain` alias. Other names require a replacement
+certificate and matching configuration.
 
 ## Open from Windows
 
-In PowerShell (substitute your username/IP/key):
+Ensure `turtlewow-server` resolves to your VM; reserve its IP in your router.
+Copy only the public certificate using your trusted SSH connection:
 
 ```powershell
-ssh -N -L 8787:127.0.0.1:8787 -i "$HOME\.ssh\turtlewow_vm" paul@192.168.2.130
+scp paul@turtlewow-server:~/.config/turtlewow-manager/tls/server.crt "$HOME\Downloads\turtlewow-server.crt"
+Import-Certificate -FilePath "$HOME\Downloads\turtlewow-server.crt" -CertStoreLocation Cert:\CurrentUser\Root
 ```
 
-Keep that terminal open and browse to **http://127.0.0.1:8787**. Alternatively,
-save a MobaXTerm SSH tunnel with local port 8787, destination 127.0.0.1:8787,
-SSH server `192.168.2.130` and your usual Ubuntu SSH credentials. The local port
-must remain 8787 with the default server config because Host validation uses it.
+Confirm the certificate came from your VM before trusting it. Its private key
+stays on Ubuntu. Open **https://turtlewow-server/admin** and use your dashboard
+login. No SSH tunnel is needed. Other Windows users/computers need the public
+certificate trust step too. The certificate lasts 825 days; regenerate it before
+expiry, restart the proxy and trust the replacement. Remove the old certificate
+from Windows after replacement.
 
 ## Operations and build exclusion
 

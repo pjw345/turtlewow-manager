@@ -41,3 +41,14 @@ The captured game log and runtime observations are retained in the operator's
 development evidence directory. No core source changes or database repairs
 were applied as part of the dashboard implementation. Gameplay correctness
 and resolution of this core shutdown failure remain outside these checks.
+
+## Direct HTTPS dashboard (2026-10-11)
+
+Replaced tunnel access with https://turtlewow-server/admin and dashboard login.
+Windows CurrentUser certificate trust installed; normal certificate-validated
+HTTPS returned 200 and the browser displayed the login form without an
+interstitial. Anonymous status/action requests are rejected. Authentication tests
+cover login, cookie attributes, CSRF, logout, expiry, credential reset and login
+rate limiting. Credentials and TLS private key remain outside the source tree.
+Realm services stayed stopped during this change; the previously recorded core
+shutdown SIGSEGV remains a separate unresolved core issue.
