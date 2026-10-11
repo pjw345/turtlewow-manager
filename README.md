@@ -209,3 +209,11 @@ arbitrary shell commands, paths, image references or SQL. Historical migration
 and character-move scripts belong in the deployment's recovery archive rather
 than the operational root. The runtime `docker/`, configuration and client data
 remain essential and must not be removed during script cleanup.
+
+
+The core must also keep the changing Git revision out of the bot precompiled
+header. `PlayerbotAIConfig.h` declares the default filename; its platform-specific
+definition and `SystemConfig.h` include live in `PlayerbotAIConfig.cpp`. Older
+core revisions with that include in the shared header legitimately invalidate
+the entire bot PCH on every new commit. Caching cannot bypass that dependency.
+The incremental fixture includes PCH consumers and private revision metadata.
