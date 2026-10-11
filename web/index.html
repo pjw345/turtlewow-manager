@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="__CSRF__">
+  <title>TurtleWoW · Control Room</title>
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="TurtleWoW home"><span class="brand-mark">T</span><span>TURTLE<span class="brand-small">CONTROL ROOM</span></span></a>
+    <div class="nav-caption">YOUR REALM</div>
+    <nav><a class="active" href="#overview"><span>◈</span> Overview</a><a href="#operations"><span>↗</span> Operations</a><a href="#backups"><span>▤</span> Backups</a><a href="#activity"><span>≋</span> Activity</a></nav>
+    <div class="sidebar-bottom"><span class="secure-dot"></span> Private connection<p>Ubuntu · Hyper-V<br>Docker Engine</p><a href="https://github.com/pjw345/turtlewow-manager" target="_blank" rel="noreferrer">Project documentation ↗</a></div>
+  </aside>
+  <main>
+    <header><div class="breadcrumbs">REALM MANAGEMENT <span>/</span> Overview</div><div class="connection" id="connection"><span></span> Connecting</div></header>
+    <section class="hero" id="overview">
+      <div><div class="eyebrow">A QUIET PLACE TO RUN YOUR WORLD</div><h1>Your realm,<br>under control.</h1><p>Everything you need to keep your adventures running.<br>One world. One clear view.</p><div class="hero-status"><span id="realm-dot" class="status-dot"></span><span id="realm-status">Checking the realm…</span><span class="hero-divider">|</span><span id="refresh-time">Waiting for first update</span></div></div>
+      <div class="realm-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="island"><div class="peak peak-one"></div><div class="peak peak-two"></div><div class="little-tree tree-one"></div><div class="little-tree tree-two"></div><div class="keep"><i></i><i></i><i></i><div class="keep-door"></div></div><div class="island-base"></div></div><span class="art-label">WESTFALL · EASTERN KINGDOMS</span><span class="art-star star-one">✧</span><span class="art-star star-two">✦</span></div>
+    </section>
+    <div id="error-banner" class="notice error" hidden role="alert"></div>
+    <section class="services" aria-label="Server services">
+      <article class="service"><div class="service-top"><span class="service-icon">↔</span><span id="realmd-badge" class="badge">Checking</span></div><h2>Login server</h2><p>Authentication & realm access</p><div class="service-footer"><code>realmd</code><span>PORT 3724</span></div></article>
+      <article class="service"><div class="service-top"><span class="service-icon">◈</span><span id="mangosd-badge" class="badge">Checking</span></div><h2>World server</h2><p>Your world, characters & Playerbots</p><div class="service-footer"><code>mangosd</code><span>PORT 8090</span></div></article>
+      <article class="service"><div class="service-top"><span class="service-icon">▤</span><span id="db-badge" class="badge">Checking</span></div><h2>Database</h2><p>World content & saved progress</p><div class="service-footer"><code>MariaDB</code><span>PRIVATE</span></div></article>
+    </section>
+    <section class="metrics" aria-label="Realm statistics">
+      <article><div class="metric-label">Users connected <span>↗</span></div><strong id="users">—</strong><p>Human client sessions</p></article>
+      <article><div class="metric-label">Bots online <span>◌</span></div><strong id="bots">—</strong><p id="bots-detail">Waiting for native telemetry</p></article>
+      <article><div class="metric-label">Memory in use <span>▥</span></div><strong id="memory">—</strong><div class="meter"><span id="memory-meter"></span></div><p id="memory-detail">Ubuntu VM memory</p></article>
+      <article><div class="metric-label">Free disk space <span>▱</span></div><strong id="disk">—</strong><div class="meter"><span id="disk-meter"></span></div><p id="disk-detail">Deployment filesystem</p></article>
+    </section>
+    <section class="work-grid" id="operations">
+      <article class="panel controls"><div class="panel-heading"><div><div class="eyebrow">THE EVERYDAY ESSENTIALS</div><h2>Realm controls</h2></div><span id="operation-badge" class="badge">Ready</span></div><p class="panel-description">Start an adventure, make a safe copy, or prepare your next build.</p>
+        <div class="control-buttons"><button class="button primary" data-action="start"><span>▶</span> Start server</button><button class="button" data-action="stop"><span>■</span> Shut down</button><button class="button" data-action="backup"><span>▤</span> Create backup</button><button class="button" data-action="build"><span>⌘</span> Build latest source</button></div>
+        <div class="build-note"><span>◈</span><div><strong>Built-in breathing room</strong><p>Builds stop the servers and take a cold backup first. Startup is locked while a build is running.</p></div></div>
+        <div class="operation-progress" id="operation-progress" hidden><div class="spinner"></div><div><strong id="operation-title"></strong><p id="operation-message"></p></div></div>
+      </article>
+      <article class="panel version"><div class="eyebrow">KNOW WHAT YOU’RE RUNNING</div><h2>Server version</h2><div class="revision"><span class="revision-mark">⌘</span><strong id="revision">—</strong><span class="badge muted" id="version-state">Inspecting</span></div><dl><div><dt>Container image</dt><dd id="image">—</dd></div><div><dt>Selected for next start</dt><dd id="selected-image">—</dd></div><div><dt>Development source</dt><dd id="dev-revision">—</dd></div></dl><div id="available-build" hidden><div class="notice success">A verified build is ready to activate.</div><button class="button full" data-action="activate">Activate build <span>↗</span></button></div><p class="version-foot">A build and its activation are separate steps. Your server starts when you choose.</p></article>
+    </section>
+    <section class="work-grid lower-grid">
+      <article class="panel" id="backups"><div class="panel-heading"><div><div class="eyebrow">KEEP YOUR PROGRESS</div><h2>Recent backups</h2></div><span class="small-label">COLD · CHECKSUMMED</span></div><div id="backup-list" class="backup-list"><div class="empty">No manager backups yet.<p>Your existing migration backups remain preserved.</p></div></div><p class="footnote">Archives stay on the VM. Copy them elsewhere for independent protection; test restores before retiring older copies.</p></article>
+      <article class="panel" id="activity"><div class="panel-heading"><div><div class="eyebrow">A CLEAR TRAIL</div><h2>Recent activity</h2></div><span class="small-label">LAST 6 OPERATIONS</span></div><div id="activity-list" class="activity-list"><div class="empty">All quiet for now.<p>Your next operation will appear here.</p></div></div></article>
+    </section>
+    <section class="panel log-panel"><div class="panel-heading"><h2>Operation output</h2><button class="text-button" id="toggle-log" aria-expanded="false">Show output ↓</button></div><pre id="operation-log" hidden>No operation output yet.</pre></section>
+    <footer><span>TURTLEWOW <span class="footer-divider">/</span> YOUR WORLD, WELL KEPT.</span><span id="sample-time">Live state updates every 5 seconds</span></footer>
+  </main>
+  <dialog id="confirm-dialog"><form method="dialog"><div class="eyebrow">REALM OPERATION</div><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="dialog-actions"><button class="button" value="cancel">Cancel</button><button class="button primary" id="confirm-button" value="confirm">Continue</button></div></form></dialog>
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

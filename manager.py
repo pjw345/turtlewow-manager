@@ -1,0 +1,560 @@
+#!/usr/bin/env python3
+"""TurtleWoW control plane. Python standard library; no shell command API."""
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import http.server
+import json
+import os
+import pathlib
+import re
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+from urllib.parse import urlsplit
+
+ROOT = pathlib.Path(__file__).resolve().parent
+CONFIG = pathlib.Path(os.environ.get('TURTLEWOW_MANAGER_CONFIG', '~/.config/turtlewow-manager/config.json')).expanduser()
+ACTIONS = {'start', 'stop', 'backup', 'build', 'activate'}
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = path.with_name(path.name + '.' + secrets.token_hex(4) + '.tmp')
+    with temp.open('w') as stream:
+        os.chmod(temp, 0o600)
+        json.dump(value, stream, indent=2)
+    os.replace(temp, path)
+
+
+def load_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return default
+
+
+@contextlib.contextmanager
+def operation_lock(path):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with path.open('a+') as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('Another operation is running. Wait for it to finish.') from None
+        try:
+            yield stream.fileno()
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def lock_busy(path):
+    try:
+        with operation_lock(path):
+            return False
+    except RuntimeError:
+        return True
+
+
+def parse_counts(text):
+    sessions = re.findall(r'Sessions online:\s*(\d+)', text)
+    bots = re.findall(r'Bots online:\s*(\d+)\s*\(active:\s*(\d+)\)', text)
+    if not sessions or not bots:
+        return None
+    return {'users': int(sessions[-1]), 'bots': int(bots[-1][0]), 'active_bots': int(bots[-1][1])}
+
+
+def env_values(path):
+    result = {}
+    for line in path.read_text().splitlines():
+        if line.strip() and not line.lstrip().startswith('#') and '=' in line:
+            key, value = line.split('=', 1)
+            result[key.strip()] = value.strip().strip('\"\'')
+    return result
+
+
+def replace_image(path, image):
+    if not re.fullmatch(r'tortoise-wow:playerbots-[0-9a-f]{8}(?:-[0-9]{14}-[0-9a-f]{4})?', image):
+        raise RuntimeError('Unrecognized build image.')
+    lines = path.read_text().splitlines()
+    matches = [index for index, line in enumerate(lines) if line.startswith('TURTLE_IMAGE=')]
+    if len(matches) > 1:
+        raise RuntimeError('Duplicate TURTLE_IMAGE settings; review the deployment first.')
+    if matches:
+        lines[matches[0]] = 'TURTLE_IMAGE=' + image
+    else:
+        lines.append('TURTLE_IMAGE=' + image)
+    temp = path.with_name('.env.manager.tmp')
+    with temp.open('w') as stream:
+        os.chmod(temp, 0o600)
+        stream.write('\n'.join(lines) + '\n')
+    os.replace(temp, path)
+
+
+class Manager:
+    def __init__(self, config):
+        self.config = config
+        self.deployment = pathlib.Path(config['deployment']).resolve()
+        self.core = pathlib.Path(config['core']).resolve()
+        self.packaging = pathlib.Path(config['packaging']).resolve()
+        self.state_dir = pathlib.Path(config['state']).expanduser().resolve()
+        self.backups = pathlib.Path(config['backups']).expanduser().resolve()
+        self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.lock_path = self.state_dir / 'operation.lock'
+        self.state_path = self.state_dir / 'operations.json'
+        self.mutex = threading.RLock()
+        self.snapshot = {'sampled_at': None, 'services': {}, 'counts': None, 'error': 'Loading server state'}
+        self.csrf = secrets.token_urlsafe(32)
+        self.count_sample = None
+        self.count_container = None
+        self.last_count_request = 0
+        self.fd = None
+        self.operation_thread = None
+        self.log_path = None
+        self.operation = None
+        self.stop_poll = threading.Event()
+        self.secret_values = [v for k, v in env_values(self.deployment / '.env').items() if 'PASSWORD' in k and v]
+        if not lock_busy(self.lock_path):
+            state = self.read_state()
+            if state.get('active'):
+                stale = state['active']
+                stale.update(status='interrupted', finished_at=now(), message='Manager stopped before the operation completed; inspect its log.')
+                state.setdefault('history', []).insert(0, stale)
+                state['active'] = None
+                atomic_json(self.state_path, state)
+
+    def redact(self, text):
+        for secret in self.secret_values:
+            text = text.replace(secret, '[redacted]')
+        return text
+
+    def read_state(self):
+        return load_json(self.state_path, {'active': None, 'history': [], 'build': None})
+
+    def record(self, message):
+        if self.log_path:
+            with self.log_path.open('a') as stream:
+                stream.write(self.redact(message) + '\n')
+        if self.operation:
+            self.operation['message'] = message
+            state = self.read_state()
+            state['active'] = self.operation
+            atomic_json(self.state_path, state)
+
+    def run(self, args, *, cwd=None, timeout=30, stream=False):
+        # Argument arrays only. Inherited lock remains held if the manager dies
+        # while its Docker client is still running.
+        inherited_fd = self.fd if threading.get_ident() == self.operation_thread else None
+        kwargs = {'cwd': cwd, 'text': True, 'stdout': subprocess.PIPE,
+                  'stderr': subprocess.STDOUT, 'pass_fds': (inherited_fd,) if inherited_fd is not None else ()}
+        if stream:
+            with subprocess.Popen(args, **kwargs) as process:
+                for line in process.stdout:
+                    with self.log_path.open('a') as output:
+                        output.write(self.redact(line))
+                if process.wait() != 0:
+                    raise RuntimeError('Command failed; see the operation log.')
+            return ''
+        result = subprocess.run(args, timeout=timeout, **kwargs)
+        if result.returncode:
+            raise RuntimeError(self.redact(result.stdout[-2000:].strip()) or 'Command failed')
+        return result.stdout.strip()
+
+    def compose(self, *args, timeout=30):
+        return self.run(['docker', 'compose', '--project-directory', str(self.deployment),
+                         '-f', str(self.deployment / 'docker-compose.yml'), *args], timeout=timeout)
+
+    def containers(self):
+        ids = self.compose('ps', '-a', '-q').split()
+        if not ids:
+            return {}
+        raw = json.loads(self.run(['docker', 'inspect', *ids]))
+        return {item['Config']['Labels']['com.docker.compose.service']: item for item in raw}
+
+    def assert_no_external_build(self):
+        # A useful additional guard for ad-hoc Docker clients, not a security
+        # boundary. All supported build/start entry points share operation.lock.
+        for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):
+            try:
+                parts = path.read_bytes().split(b'\0')
+                if parts and pathlib.Path(os.fsdecode(parts[0])).name == 'docker':
+                    args = [os.fsdecode(p) for p in parts[1:] if p]
+                    if args[:1] == ['build'] or args[:2] == ['buildx', 'build']:
+                        raise RuntimeError('An external Docker build is running; wait before starting.')
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                pass
+
+    def stopped(self):
+        items = self.containers()
+        if any(item['State']['Running'] for item in items.values()):
+            raise RuntimeError('A deployment container is still running; build/backup cancelled.')
+        return items
+
+    def shutdown(self):
+        initializer = self.containers().get('db-init')
+        if initializer and initializer['State']['Running']:
+            raise RuntimeError('Database initialization is still running. Wait before stopping, backing up or building.')
+        self.record('Stopping world, login and database services cleanly…')
+        self.compose('stop', '-t', '120', 'mangosd', 'realmd', 'db', timeout=180)
+        return self.stopped()
+
+    def cold_backup(self):
+        items = self.stopped()
+        self.backups.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = self.backups / (dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-') + secrets.token_hex(3))
+        target.mkdir(mode=0o700)
+        self.record('Creating a cold database, marker and configuration backup…')
+        volumes = {}
+        try:
+            for service, mount_point, leaf in [('db', '/var/lib/mysql', 'db-data.tar.gz'),
+                                              ('db-init', '/var/lib/turtle-init', 'init-marker.tar.gz')]:
+                item = items.get(service)
+                if not item:
+                    raise RuntimeError(f'{service} container is missing; cannot identify its backup volume.')
+                mounts = [m for m in item['Mounts'] if m['Destination'] == mount_point and m['Type'] == 'volume']
+                if len(mounts) != 1:
+                    raise RuntimeError(f'Expected exactly one named volume for {service}.')
+                volume = mounts[0]['Name']
+                volumes[service] = volume
+                image = items['mangosd']['Config']['Image']
+                self.run(['docker', 'run', '--rm', '--network', 'none', '--user', '0', '--entrypoint', 'sh',
+                          '--mount', f'type=volume,source={volume},target=/source,readonly',
+                          '--mount', f'type=bind,source={target},target=/backup', image, '-c',
+                          'tar -C /source -czf "/backup/$1" . && chown "$2:$3" "/backup/$1"',
+                          'backup', leaf, str(os.getuid()), str(os.getgid())], timeout=600)
+                os.chmod(target / leaf, 0o600)
+            with tarfile.open(target / 'deployment-config.tar.gz', 'w:gz') as archive:
+                for leaf in ('.env', 'docker-compose.yml', 'config', 'docker'):
+                    archive.add(self.deployment / leaf, arcname=leaf)
+            atomic_json(target / 'manifest.json', {'created_at': now(), 'volumes': volumes,
+                        'source': self.snapshot.get('version'), 'image': items['mangosd']['Image'],
+                        'mariadb_image': items['db']['Image'], 'kind': 'cold physical backup'})
+            hashes = []
+            for leaf in ('db-data.tar.gz', 'init-marker.tar.gz', 'deployment-config.tar.gz'):
+                with tarfile.open(target / leaf) as archive:
+                    if not archive.getmembers():
+                        raise RuntimeError(f'Empty archive: {leaf}')
+                with (target / leaf).open('rb') as stream:
+                    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                hashes.append(f'{digest}  {leaf}')
+            (target / 'SHA256SUMS').write_text('\n'.join(hashes) + '\n')
+            self.record('Backup archives and checksums verified: ' + target.name)
+            return str(target)
+        except Exception:
+            (target / 'INCOMPLETE').write_text('Backup failed. Do not restore this directory.\n')
+            raise
+
+    def start(self):
+        self.assert_no_external_build()
+        self.record('Starting database, login and world services…')
+        self.compose('up', '-d', 'realmd', 'mangosd', timeout=240)
+        self.record('Containers started. World initialization can take several minutes; watch readiness below.')
+
+    def build(self, revision=None):
+        self.assert_no_external_build()
+        for repo in (self.core, self.packaging):
+            if self.run(['git', '-C', str(repo), 'status', '--porcelain']):
+                raise RuntimeError('A development checkout has uncommitted changes; commit and push before building.')
+        revision = revision or self.run(['git', '-C', str(self.core), 'rev-parse', 'HEAD'])
+        if not re.fullmatch(r'[0-9a-f]{40}', revision):
+            raise RuntimeError('Build revision must be a full 40-character commit SHA.')
+        self.run(['git', '-C', str(self.core), 'fetch', 'origin', revision], timeout=90)
+        self.shutdown()
+        backup = self.cold_backup()
+        # Unique tag per operation: rebuilding the same source must not move a
+        # tag already selected by a production deployment or rollback image.
+        suffix = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S') + '-' + secrets.token_hex(2)
+        image = 'tortoise-wow:playerbots-' + revision[:8] + '-' + suffix
+        self.record('Compiling ' + revision[:8] + ' with two jobs. Servers remain stopped.')
+        self.run(['docker', 'build', '--build-arg', 'SOURCE_COMMIT=' + revision,
+                  '--build-arg', 'BUILD_PLAYERBOTS=ON', '--build-arg', 'BUILD_JOBS=2',
+                  '--build-arg', 'CPU_TARGET=x86-64-v2', '--tag', image, '.'], cwd=self.packaging, stream=True)
+        actual = self.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'cat', image, '/opt/turtle/SOURCE_COMMIT'])
+        if actual != revision:
+            raise RuntimeError('Built image source SHA does not match the requested revision.')
+        state = self.read_state()
+        state['build'] = {'image': image, 'revision': revision, 'finished_at': now(), 'backup': backup}
+        atomic_json(self.state_path, state)
+        self.record('Build verified. Use “Activate build” to select it; startup is a separate action.')
+
+    def activate(self):
+        build = self.read_state().get('build')
+        if not build:
+            raise RuntimeError('No successful dashboard build is available.')
+        actual = self.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'cat', build['image'], '/opt/turtle/SOURCE_COMMIT'])
+        if actual != build['revision']:
+            raise RuntimeError('Build image changed; activation cancelled.')
+        self.shutdown()
+        self.cold_backup()
+        replace_image(self.deployment / '.env', build['image'])
+        self.record('Selected ' + build['image'] + '. Start the server when ready.')
+
+    def execute(self, action, revision=None, reserved_fd=None):
+        if action not in ACTIONS:
+            raise RuntimeError('Unknown action.')
+        lock = contextlib.nullcontext(reserved_fd) if reserved_fd is not None else operation_lock(self.lock_path)
+        with lock as fd:
+            self.fd = fd
+            self.operation_thread = threading.get_ident()
+            operation_id = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-') + secrets.token_hex(3)
+            self.log_path = self.state_dir / (operation_id + '.log')
+            self.log_path.touch(mode=0o600)
+            self.operation = {'id': operation_id, 'action': action, 'status': 'running', 'started_at': now(), 'message': 'Starting…'}
+            self.record('Starting ' + action)
+            error = None
+            try:
+                if action == 'start':
+                    self.start()
+                elif action == 'stop':
+                    self.shutdown()
+                elif action == 'build':
+                    self.build(revision)
+                elif action == 'activate':
+                    self.activate()
+                elif action == 'backup':
+                    running = {service for service, item in self.containers().items() if item['State']['Running']}
+                    self.shutdown()
+                    self.operation['backup'] = self.cold_backup()
+                    if running:
+                        self.record('Restoring the services that were running before backup…')
+                        self.compose('up', '-d', *sorted(running), timeout=240)
+                self.operation['status'] = 'succeeded'
+            except Exception as exc:
+                error = self.redact(str(exc))
+                self.record(error)
+                self.operation['status'] = 'failed'
+            finally:
+                self.operation['finished_at'] = now()
+                state = self.read_state()
+                state.setdefault('history', []).insert(0, self.operation)
+                state['history'] = state['history'][:50]
+                state['active'] = None
+                atomic_json(self.state_path, state)
+                self.fd = self.log_path = self.operation = None
+                self.operation_thread = None
+            if error:
+                raise RuntimeError(error)
+
+    def submit(self, action):
+        stream = self.lock_path.open('a+')
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            stream.close()
+            raise RuntimeError('Another operation is running. Wait for it to finish.')
+        def work():
+            try:
+                self.execute(action, reserved_fd=stream.fileno())
+            except RuntimeError:
+                pass  # Failure is persisted by execute; no credential output.
+            finally:
+                stream.close()
+        threading.Thread(target=work, daemon=True).start()
+
+    def poll(self):
+        while not self.stop_poll.is_set():
+            try:
+                items = self.containers()
+                services = {}
+                for service in ('db', 'realmd', 'mangosd'):
+                    item = items.get(service)
+                    services[service] = {'state': item['State']['Status'] if item else 'missing',
+                                         'ready': False, 'restarts': item.get('RestartCount', 0) if item else 0}
+                    if item and service == 'db':
+                        services[service]['ready'] = item['State'].get('Health', {}).get('Status') == 'healthy'
+                env = env_values(self.deployment / '.env')
+                host = env.get('GAME_BIND_IP', '127.0.0.1')
+                if host in ('0.0.0.0', '::'):
+                    host = '127.0.0.1'
+                for service, key, port in [('realmd', 'REALM_PORT', 3724), ('mangosd', 'WORLD_PORT', 8090)]:
+                    if services[service]['state'] == 'running':
+                        try:
+                            with socket.create_connection((host, int(env.get(key, port))), timeout=1):
+                                services[service]['ready'] = True
+                        except OSError:
+                            pass
+                world = items.get('mangosd')
+                counts = None
+                if world and world['State']['Running']:
+                    world_port_ready = services['mangosd']['ready']
+                    logs = self.compose('logs', '--no-color', '--timestamps', '--since', world['State']['StartedAt'], '--tail', '350', 'mangosd')
+                    ready = services['mangosd']['ready'] and 'World server is up and running' in logs
+                    # Keep the readiness observation for this exact container start,
+                    # even after the startup line scrolls out of the log tail.
+                    generation = world['Id'] + world['State']['StartedAt']
+                    if self.count_container != generation:
+                        self.count_container, self.count_sample = generation, None
+                        self.world_ready = False
+                    self.world_ready = getattr(self, 'world_ready', False) or ready
+                    services['mangosd']['ready'] = services['mangosd']['ready'] and self.world_ready
+                    if services['mangosd']['state'] == 'running' and not lock_busy(self.lock_path):
+                        if time.monotonic() - self.last_count_request > 15:
+                            self.compose('exec', '-T', '-u', 'turtle', 'mangosd', 'sh', '-c',
+                                         'printf "rndbot diff\\n" > /opt/turtle/run/mangosd.in', timeout=3)
+                            self.last_count_request = time.monotonic()
+                        native = parse_counts(logs)
+                        if native:
+                            matches = re.findall(r'(\d{4}-\d\d-\d\dT[^\s]+).*Bots online:', logs)
+                            sampled_at = matches[-1] if matches else now()
+                            self.count_sample = {'values': native, 'sampled_at': sampled_at}
+                            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(sampled_at.replace('Z', '+00:00'))).total_seconds()
+                            counts = native if age < 45 and world_port_ready else None
+                            if counts is not None:
+                                services['mangosd']['ready'] = True
+                                self.world_ready = True
+                elif services['mangosd']['state'] in ('exited', 'created', 'missing'):
+                    counts = {'users': 0, 'bots': 0, 'active_bots': 0}
+                    self.count_sample = None
+                version, image = None, None
+                if world:
+                    image = world['Config']['Image']
+                    version = world['Config'].get('Labels', {}).get('org.opencontainers.image.revision')
+                memory = dict(line.split(':', 1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines())
+                total = int(memory['MemTotal'].split()[0]) * 1024
+                available = int(memory['MemAvailable'].split()[0]) * 1024
+                disk = shutil.disk_usage(self.deployment)
+                head = self.run(['git', '-C', str(self.core), 'rev-parse', 'HEAD'])
+                selected = env.get('TURTLE_IMAGE', 'ghcr.io/pjw345/tortoise-docker:' + env.get('TAG', 'playerbots'))
+                self.snapshot = {'sampled_at': now(), 'services': services, 'counts': counts,
+                                 'counts_sampled_at': (self.count_sample or {}).get('sampled_at'),
+                                 'image': image, 'version': version, 'selected_image': selected, 'development_revision': head,
+                                 'disk': {'total': disk.total, 'free': disk.free},
+                                 'memory': {'total': total, 'used': total - available},
+                                 'load': os.getloadavg()[0], 'error': None}
+            except Exception as exc:
+                self.snapshot = {'sampled_at': now(), 'services': {}, 'counts': None, 'error': self.redact(str(exc))}
+            self.stop_poll.wait(5)
+
+    def status(self):
+        state = self.read_state()
+        result = dict(self.snapshot)
+        result.update(active=state.get('active'), history=state.get('history', []), build=state.get('build'), busy=lock_busy(self.lock_path))
+        operation = result['active'] or next(iter(result['history']), None)
+        result['log'] = ''
+        if operation:
+            path = self.state_dir / (operation['id'] + '.log')
+            if path.exists():
+                with path.open('rb') as stream:
+                    stream.seek(max(0, path.stat().st_size - 12000))
+                    result['log'] = self.redact(stream.read().decode('utf-8', errors='replace'))
+        backups = []
+        if self.backups.exists():
+            for path in sorted(self.backups.iterdir(), reverse=True):
+                if path.is_dir() and (path / 'SHA256SUMS').exists() and not (path / 'INCOMPLETE').exists():
+                    backups.append({'name': path.name, 'size': sum(p.stat().st_size for p in path.iterdir() if p.is_file())})
+        result['backups'] = backups[:10]
+        return result
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = 'TurtleWoWManager'
+
+    def log_message(self, fmt, *args):
+        # Avoid logging paths or credentials.
+        pass
+
+    def reply(self, status, payload, mime='application/json'):
+        raw = json.dumps(payload).encode() if mime == 'application/json' else payload
+        self.send_response(status)
+        self.send_header('Content-Type', mime + '; charset=utf-8')
+        self.send_header('Content-Length', str(len(raw)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def permitted(self):
+        host = self.headers.get('Host', '')
+        allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        if host not in allowed:
+            self.reply(403, {'error': 'Use the loopback SSH tunnel address.'})
+            return False
+        return True
+
+    def do_GET(self):
+        if not self.permitted():
+            return
+        path = urlsplit(self.path).path
+        if path == '/api/status':
+            self.reply(200, self.server.manager.status())
+        elif path in ('/', '/app.js', '/style.css'):
+            leaf = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[path]
+            content = (ROOT / 'web' / leaf).read_bytes().replace(b'__CSRF__', self.server.manager.csrf.encode())
+            mime = {'/': 'text/html', '/app.js': 'text/javascript', '/style.css': 'text/css'}[path]
+            self.reply(200, content, mime)
+        else:
+            self.reply(404, {'error': 'Not found'})
+
+    def do_POST(self):
+        if not self.permitted():
+            return
+        origin = self.headers.get('Origin')
+        expected = 'http://' + self.headers['Host']
+        if origin != expected or not secrets.compare_digest(self.headers.get('X-CSRF-Token', ''), self.server.manager.csrf):
+            self.reply(403, {'error': 'Refresh the dashboard before submitting an action.'})
+            return
+        if self.headers.get('Content-Type') != 'application/json':
+            self.reply(415, {'error': 'JSON required'})
+            return
+        if urlsplit(self.path).path != '/api/action':
+            self.reply(404, {'error': 'Not found'})
+            return
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+            if not 0 < length <= 1024:
+                raise ValueError('Invalid request size')
+            value = json.loads(self.rfile.read(length))
+            action = value.get('action')
+            if action not in ACTIONS:
+                raise ValueError('Unknown action')
+            self.server.manager.submit(action)
+            self.reply(202, {'accepted': True})
+        except (ValueError, AttributeError) as exc:
+            self.reply(400, {'error': str(exc)})
+        except RuntimeError as exc:
+            self.reply(409, {'error': str(exc)})
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['serve', 'start', 'stop', 'backup', 'build', 'activate', 'status'])
+    parser.add_argument('revision', nargs='?')
+    args = parser.parse_args()
+    os.umask(0o077)
+    manager = Manager(load_json(CONFIG, {}))
+    if args.command == 'serve':
+        threading.Thread(target=manager.poll, daemon=True).start()
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', manager.config.get('port', 8787)), Handler)
+        server.manager = manager
+        print('TurtleWoW manager listening on loopback port ' + str(server.server_port), flush=True)
+        try:
+            server.serve_forever()
+        finally:
+            manager.stop_poll.set()
+            server.server_close()
+    elif args.command == 'status':
+        print(json.dumps(manager.status(), indent=2))
+    else:
+        manager.execute(args.command, args.revision)
+        print('Operation completed. See the dashboard activity log for details.')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
