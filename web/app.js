@@ -36,6 +36,11 @@ function render(data) {
   text('version-state',ready ? 'Running' : 'Container version');
   text('operation-badge',data.busy ? 'Operation running' : 'Ready'); $('operation-badge').className='badge '+(data.busy?'pending':'good');
   $('operation-progress').hidden=!data.active; text('operation-title',names[data.active?.action]); text('operation-message',data.active?.message);
+  const progress=data.active?.action==='build' ? data.active.progress : null;
+  $('build-progress').hidden=!progress;
+  text('build-progress-label',progress ? progress.stage+(progress.percent!=null ? ` · ${progress.percent}% compiled` : '') : '');
+  if(progress?.percent!=null) $('build-progress-bar').value=progress.percent;
+  else $('build-progress-bar').removeAttribute('value');
   $('available-build').hidden=!data.build || data.build.image===data.selected_image;
   document.querySelectorAll('[data-action]').forEach(button => {button.disabled=sending||data.busy||!!data.error||(button.dataset.action==='start'&&ready)||(button.dataset.action==='activate'&&!data.build);});
   const list=$('backup-list');

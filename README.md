@@ -1,6 +1,6 @@
 # TurtleWoW Control Room
 
-A single-page, private server dashboard for the Ubuntu Hyper-V deployment of
+A single-page, private server dashboard for the Ubuntu Server 26.04.1 LTS Hyper-V deployment of
 [`pjw345/tortoise-wow`](https://github.com/pjw345/tortoise-wow) and
 [`pjw345/tortoise-docker`](https://github.com/pjw345/tortoise-docker).
 Python 3.11+ and the browser's native APIs; no Node runtime, CDN, database
@@ -15,6 +15,9 @@ migrations or frontend build step. Docker Engine/Compose must already be install
 - The source SHA embedded in the container's image label, selected deployment
   image and committed development SHA.
 - Start, clean stop, cold backup, source-pinned build and separate build activation.
+- Live build stages and CMake compilation percentage, refreshed every five seconds.
+  The percentage measures compilation work, not elapsed time or the whole image build;
+  packaging and verification follow. Cached builds can jump straight to those stages.
 - Durable operation history and logs, archive checksums and recent backups.
 
 Nonzero container exit codes are displayed prominently. If a requested shutdown
