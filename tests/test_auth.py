@@ -3,7 +3,8 @@ import pathlib
 import tempfile
 import time
 import unittest
-from auth import Auth, password_hash
+from unittest.mock import patch
+from auth import Auth, password_hash, create_admin
 
 class AuthTests(unittest.TestCase):
     def setUp(self):
@@ -17,6 +18,11 @@ class AuthTests(unittest.TestCase):
     def test_wrong_password_and_username_rejected(self):
         self.assertIsNone(self.auth.login('admin', 'wrong')[0])
         self.assertIsNone(self.auth.login('other', 'test-password-only')[0])
+    def test_short_password_still_requests_confirmation(self):
+        with patch('builtins.input', return_value='admin'), patch('auth.getpass.getpass', side_effect=['short', 'short']) as prompt:
+            with self.assertRaisesRegex(RuntimeError, 'too short'):
+                create_admin(self.path)
+            self.assertEqual(prompt.call_count, 2)
     def test_login_expiry_logout_and_password_change(self):
         token, error = self.auth.login('admin', 'test-password-only')
         self.assertIsNone(error)

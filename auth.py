@@ -19,8 +19,11 @@ def password_hash(password, salt):
 def create_admin(path):
     username = input('Dashboard username [admin]: ').strip() or 'admin'
     password = getpass.getpass('New dashboard password (at least 12 characters): ')
-    if len(password) < 12 or password != getpass.getpass('Confirm password: '):
-        raise RuntimeError('Password must match and contain at least 12 characters.')
+    confirmation = getpass.getpass('Confirm password: ')
+    if len(password) < 12:
+        raise RuntimeError('Password is too short. Use at least 12 characters and run create-admin again.')
+    if password != confirmation:
+        raise RuntimeError('Passwords do not match. Run create-admin again.')
     salt = secrets.token_hex(32)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_suffix('.tmp')
