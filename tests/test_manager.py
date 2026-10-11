@@ -48,6 +48,7 @@ class Sandbox(manager.Manager):
             return REVISION
         if args[:2] == ['docker', 'build']:
             self.calls.append('compile')
+            self.compile_args = list(args)
             if self.fail_build:
                 raise RuntimeError('Compilation failed')
             return ''
@@ -91,6 +92,14 @@ class OperationsTest(unittest.TestCase):
         self.assertFalse(self.manager.running)
         self.assertEqual(self.manager.read_state()['build']['revision'], REVISION)
         self.assertIn('12345678', (self.manager.deployment / '.env').read_text())
+
+    def test_build_uses_local_source_and_persistent_builder(self):
+        self.manager.execute('build', REVISION)
+        args = self.manager.compile_args
+        self.assertIn('local-core=' + str(self.manager.core), args)
+        self.assertIn('BUILD_SOURCE=local-builder', args)
+        self.assertIn('SOURCE_COMMIT=' + REVISION, args)
+        self.assertNotIn('--no-cache', args)
 
     def test_failed_shutdown_never_compiles(self):
         self.manager.fail_stop = True
