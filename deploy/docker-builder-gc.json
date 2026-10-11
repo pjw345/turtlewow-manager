@@ -1,0 +1,18 @@
+{
+  "builder": {
+    "gc": {
+      "enabled": true,
+      "policy": [
+        {
+          "all": true,
+          "filter": [
+            "type=regular"
+          ],
+          "reservedSpace": "12GB",
+          "maxUsedSpace": "30GB",
+          "minFreeSpace": "25GB"
+        }
+      ]
+    }
+  }
+}
