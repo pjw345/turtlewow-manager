@@ -153,6 +153,30 @@ class Manager:
             state['active'] = self.operation
             atomic_json(self.state_path, state)
 
+    def build_progress(self, stage, percent=None):
+        if not self.operation or self.operation['action'] != 'build':
+            return
+        progress = {'stage': stage, 'percent': percent}
+        if self.operation.get('progress') == progress:
+            return
+        self.operation['progress'] = progress
+        self.record(stage + (f' · {percent}% compiled' if percent is not None else ''))
+
+    def build_output(self, line):
+        if not self.operation or self.operation['action'] != 'build':
+            return
+        match = re.search(r'\[\s*(\d{1,3})%\]\s+(?:Building|Linking|Built target)', line)
+        if match and int(match[1]) <= 100:
+            previous = self.operation.get('progress', {})
+            percent = int(match[1])
+            if previous.get('stage') == 'Compiling':
+                percent = max(percent, previous.get('percent') or 0)
+            self.build_progress('Compiling', percent)
+        elif '-- Installing:' in line or '-- Up-to-date:' in line:
+            self.build_progress('Packaging image')
+        elif 'exporting to image' in line:
+            self.build_progress('Exporting image')
+
     def run(self, args, *, cwd=None, timeout=30, stream=False):
         # Argument arrays only. Inherited lock remains held if the manager dies
         # while its Docker client is still running.
@@ -164,6 +188,7 @@ class Manager:
                 for line in process.stdout:
                     with self.log_path.open('a') as output:
                         output.write(self.redact(line))
+                    self.build_output(line)
                 if process.wait() != 0:
                     raise RuntimeError('Command failed; see the operation log.')
             return ''
@@ -271,6 +296,7 @@ class Manager:
         self.record('Containers started. World initialization can take several minutes; watch readiness below.')
 
     def build(self, revision=None):
+        self.build_progress('Checking source')
         self.assert_no_external_build()
         for repo in (self.core, self.packaging):
             if self.run(['git', '-C', str(repo), 'status', '--porcelain']):
@@ -279,23 +305,28 @@ class Manager:
         if not re.fullmatch(r'[0-9a-f]{40}', revision):
             raise RuntimeError('Build revision must be a full 40-character commit SHA.')
         self.run(['git', '-C', str(self.core), 'fetch', 'origin', revision], timeout=90)
+        self.build_progress('Stopping services')
         self.shutdown()
+        self.build_progress('Creating backup')
         backup = self.cold_backup()
         # Unique tag per operation: rebuilding the same source must not move a
         # tag already selected by a production deployment or rollback image.
         suffix = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S') + '-' + secrets.token_hex(2)
         image = 'tortoise-wow:playerbots-' + revision[:8] + '-' + suffix
         self.record('Building ' + revision[:8] + ' with two jobs and persistent compiler/object caches. Servers remain stopped.')
-        self.run(['docker', 'build', '--build-context', 'local-core=' + str(self.core),
+        self.build_progress('Preparing compiler and cache')
+        self.run(['docker', 'build', '--progress=plain', '--build-context', 'local-core=' + str(self.core),
                   '--build-arg', 'BUILD_SOURCE=local-builder', '--build-arg', 'SOURCE_COMMIT=' + revision,
                   '--build-arg', 'BUILD_PLAYERBOTS=ON', '--build-arg', 'BUILD_JOBS=2',
                   '--build-arg', 'CPU_TARGET=x86-64-v2', '--tag', image, '.'], cwd=self.packaging, stream=True)
+        self.build_progress('Verifying image')
         actual = self.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'cat', image, '/opt/turtle/SOURCE_COMMIT'])
         if actual != revision:
             raise RuntimeError('Built image source SHA does not match the requested revision.')
         state = self.read_state()
         state['build'] = {'image': image, 'revision': revision, 'finished_at': now(), 'backup': backup}
         atomic_json(self.state_path, state)
+        self.build_progress('Complete')
         self.record('Build verified. Use “Activate build” to select it; startup is a separate action.')
 
     def activate(self):
