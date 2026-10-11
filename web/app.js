@@ -16,15 +16,16 @@ function element(tag, cls, value) { const el=document.createElement(tag); if(cls
 function render(data) {
   current=data;
   $('connection').className='connection live'; $('connection').lastChild.textContent=' Live connection';
-  $('error-banner').hidden=!data.error; text('error-banner',data.error);
+  $('error-banner').hidden=!(data.error||data.warning); text('error-banner',data.error||data.warning);
   const ready=data.services?.mangosd?.ready;
-  text('realm-status',data.busy ? 'An operation is in progress' : ready ? 'The realm is ready for adventure' : data.services?.mangosd?.state==='running' ? 'World server is initializing' : 'The realm is resting');
+  text('realm-status',data.busy ? 'An operation is in progress' : data.warning ? 'The realm needs attention' : ready ? 'The realm is ready for adventure' : data.services?.mangosd?.state==='running' ? 'World server is initializing' : 'The realm is resting');
   $('realm-dot').className='status-dot '+(data.busy ? 'busy' : ready ? 'online' : '');
   text('refresh-time','Updated '+timeLabel(data.sampled_at));
   for(const key of ['realmd','mangosd','db']) {
     const s=data.services?.[key], b=$(key+'-badge');
     b.textContent=!s ? 'Unavailable' : s.ready ? 'Running' : s.state==='running' ? 'Starting' : ['exited','created','missing'].includes(s.state) ? 'Stopped' : s.state;
     b.className='badge '+(!s ? 'bad' : s.ready ? 'good' : s.state==='running' ? 'pending' : 'muted');
+    if(s?.state==='exited'&&s.exit_code) {b.textContent='Exit '+s.exit_code;b.className='badge bad';}
   }
   const stale=data.counts_sampled_at && Date.now()-Date.parse(data.counts_sampled_at)>45000;
   text('users',stale ? '—' : data.counts?.users); text('bots',stale ? '—' : data.counts?.bots);
