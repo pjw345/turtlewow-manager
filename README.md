@@ -108,6 +108,34 @@ containers are stopped, takes a cold backup, compiles with two jobs, and verifie
 `/opt/turtle/SOURCE_COMMIT`. It leaves the realm stopped. Failed builds do not
 select an image or automatically restart the realm.
 
+### Incremental Ubuntu builds
+
+The dashboard passes the local committed core checkout to Docker as the
+`local-core` named context and selects the packaging repository's `local-builder`.
+Compilation still uses its Ubuntu toolchain; installing compilers on the VM host
+is unnecessary. The builder copies the requested commit and Eluna submodule
+from local Git objects into a separate persistent cache, without changing the
+development checkout. The existing origin-SHA check remains in place.
+
+BuildKit retains one source/build tree per target platform in
+`turtlewow-native-v1-*`, including CMake dependency information and object files.
+Unchanged files keep their timestamps across revisions. Make recompiles changed
+files and files affected by changed headers or compiler flags. A **3 GB ccache**
+limit bounds the secondary compiler-result cache; it is not a cap on the whole
+object/build tree. Every build still embeds and verifies its requested SHA.
+
+The first build, a toolchain change or removal/eviction of Docker's build cache
+can require a full compilation. Documentation-only changes normally require no
+C++ compilation, although the core's generated revision metadata may require a
+small rebuild/relink. Packaging, image export and cold backup still take time.
+Starting the realm never compiles it. Two parallel compile jobs remain the default.
+
+Normal image cleanup should retain build cache. `docker builder prune`/Docker
+system pruning can discard it; that loses speed, not source or runtime data.
+The cache is reusable build data, not a backup. BuildKit's locked cache mount
+serializes writers in addition to the dashboard's existing operation lock.
+Use a packaging revision that contains `local-builder` with this manager version.
+
 Activation takes another cold backup and changes only `TURTLE_IMAGE` in `.env`.
 Startup remains a separate action. Image switching can run migrations at next
 startup; an old image is not a database rollback. Restore compatible database
@@ -181,3 +209,37 @@ arbitrary shell commands, paths, image references or SQL. Historical migration
 and character-move scripts belong in the deployment's recovery archive rather
 than the operational root. The runtime `docker/`, configuration and client data
 remain essential and must not be removed during script cleanup.
+
+
+The core must also keep the changing Git revision out of the bot precompiled
+header. `PlayerbotAIConfig.h` declares the default filename; its platform-specific
+definition and `SystemConfig.h` include live in `PlayerbotAIConfig.cpp`. Older
+core revisions with that include in the shared header legitimately invalidate
+the entire bot PCH on every new commit. Caching cannot bypass that dependency.
+The incremental fixture includes PCH consumers and private revision metadata.
+
+
+### Build cache retention on this VM
+
+The retained native tree currently occupies about 18 GB (objects, archives, PCH,
+source and compiler results). The compiler-result subdirectory alone is capped
+at 3 GB. Docker's default GC can remove cache mounts after 48 hours; default
+image cleanup is not sufficient to preserve an incremental baseline.
+
+Our VM uses a custom Docker daemon GC policy restricted to `type=regular`, so
+native `exec.cachemount` records are preserved. It reserves 12 GB of layer cache,
+uses a 30 GB cache ceiling and a 25 GB free-space target for eligible cleanup.
+Protected mounts are additional non-prunable data, so those thresholds do not
+guarantee a total disk cap. Monitor VM disk space; deleting build cache explicitly
+requires a later full compilation. Scheduled server-image cleanup stays enabled.
+
+The example `deploy/docker-builder-gc.json` in turtlewow-manager contains only
+the builder settings. Merge them into an existing `/etc/docker/daemon.json`,
+preserving logging and other settings. Choose limits appropriate to your disk.
+Validate with `sudo dockerd --validate --config-file /etc/docker/daemon.json`.
+Applying builder GC changes requires restarting Docker while the realm is stopped
+and no manager operation is running; SIGHUP does not update builder GC. Confirm
+the actual filters/limits with `docker buildx inspect --bootstrap` afterward.
+For this installed Docker version the filter is the positive `type=regular`;
+a negative `type!=...` daemon filter is not translated into a BuildKit filter.
+See [Docker GC documentation](https://docs.docker.com/build/cache/garbage-collection/).
