@@ -108,6 +108,34 @@ containers are stopped, takes a cold backup, compiles with two jobs, and verifie
 `/opt/turtle/SOURCE_COMMIT`. It leaves the realm stopped. Failed builds do not
 select an image or automatically restart the realm.
 
+### Incremental Ubuntu builds
+
+The dashboard passes the local committed core checkout to Docker as the
+`local-core` named context and selects the packaging repository's `local-builder`.
+Compilation still uses its Ubuntu toolchain; installing compilers on the VM host
+is unnecessary. The builder copies the requested commit and Eluna submodule
+from local Git objects into a separate persistent cache, without changing the
+development checkout. The existing origin-SHA check remains in place.
+
+BuildKit retains one source/build tree per target platform in
+`turtlewow-native-v1-*`, including CMake dependency information and object files.
+Unchanged files keep their timestamps across revisions. Make recompiles changed
+files and files affected by changed headers or compiler flags. A **3 GB ccache**
+limit bounds the secondary compiler-result cache; it is not a cap on the whole
+object/build tree. Every build still embeds and verifies its requested SHA.
+
+The first build, a toolchain change or removal/eviction of Docker's build cache
+can require a full compilation. Documentation-only changes normally require no
+C++ compilation, although the core's generated revision metadata may require a
+small rebuild/relink. Packaging, image export and cold backup still take time.
+Starting the realm never compiles it. Two parallel compile jobs remain the default.
+
+Normal image cleanup should retain build cache. `docker builder prune`/Docker
+system pruning can discard it; that loses speed, not source or runtime data.
+The cache is reusable build data, not a backup. BuildKit's locked cache mount
+serializes writers in addition to the dashboard's existing operation lock.
+Use a packaging revision that contains `local-builder` with this manager version.
+
 Activation takes another cold backup and changes only `TURTLE_IMAGE` in `.env`.
 Startup remains a separate action. Image switching can run migrations at next
 startup; an old image is not a database rollback. Restore compatible database
